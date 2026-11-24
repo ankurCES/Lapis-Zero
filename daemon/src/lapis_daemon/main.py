@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import signal
 import sys
 from collections.abc import Callable
@@ -11,6 +12,7 @@ from pathlib import Path
 
 from lapis_daemon import __version__
 from lapis_daemon.agent.runner import TaskRunner
+from lapis_daemon.agent.scheduler import CronScheduler, Schedule
 from lapis_daemon.config import (
     DEFAULT_CONFIG,
     CoreConfig,
@@ -24,8 +26,10 @@ from lapis_daemon.config import (
 )
 from lapis_daemon.db import LapisDb
 from lapis_daemon.ipc_server import IpcServer
-from lapis_daemon.kvm.base import MockHostDriver
+from lapis_daemon.kvm.base import HostDriver, MockHostDriver, build_host_driver
 from lapis_daemon.system_status import mock_state
+
+_suppress = contextlib.suppress
 
 # Pause between mock steps so the UI ticker is watchable.
 MOCK_STEP_DELAY_SEC = 0.8
@@ -65,22 +69,49 @@ def _load_or_mock[T](
         return fallback()
 
 
-async def serve_until_signal(paths: EffectivePaths, config: CoreConfig, hosts: HostsConfig) -> None:
+async def serve_until_signal(
+    paths: EffectivePaths, config: CoreConfig, hosts: HostsConfig, *, is_mock: bool
+) -> None:
     """Serve IPC until SIGINT/SIGTERM, then stop cleanly."""
     paths.db_path.parent.mkdir(parents=True, exist_ok=True)
     db = LapisDb(paths.db_path)
     await db.init()
-    # Phase 2 only has the mock driver; real VNC/SSH drivers land in Phase 3.
+    if is_mock:
+        driver_factory = MockHostDriver
+    else:
+
+        def driver_factory(name: str) -> HostDriver:
+            return build_host_driver(name, hosts.hosts[name], config)
+
     runner = TaskRunner(
         db,
         hosts,
-        driver_factory=MockHostDriver,
+        driver_factory=driver_factory,
         max_steps=config.llm.max_steps,
-        step_delay=MOCK_STEP_DELAY_SEC,
+        step_delay=MOCK_STEP_DELAY_SEC if is_mock else 0.0,
     )
     server = IpcServer(paths.socket_path, db, hosts, runner, mock_state)
+
+    # Unattended cron schedules (SPEC 7.3); real tasks land only when the daemon is not mock.
+    async def _run_scheduled(name: str, host: str, prompt: str) -> None:
+        if is_mock:
+            return
+        with _suppress(ValueError):
+            await runner.submit_task(host, prompt)
+
+    scheduler = CronScheduler(_run_scheduled)
+    scheduler.set_schedules(
+        [
+            Schedule(s.name, s.schedule, s.host, s.prompt)
+            for s in config.cron.schedules
+            if s.enabled and s.host in hosts.hosts
+        ]
+    )
+    scheduler.start()
+
     await server.start()
-    print(f"lapis-daemon {__version__} listening on {paths.socket_path} (mock KVM)", flush=True)
+    mode = "mock KVM" if is_mock else "real Option C KVM"
+    print(f"lapis-daemon {__version__} listening on {paths.socket_path} ({mode})", flush=True)
 
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -89,6 +120,7 @@ async def serve_until_signal(paths: EffectivePaths, config: CoreConfig, hosts: H
     try:
         await stop.wait()
     finally:
+        scheduler.stop()
         if runner.is_running:
             await runner.kill_all()
         await server.stop()
@@ -106,7 +138,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"lapis-daemon: cannot load configuration: {exc}", file=sys.stderr)
         return 2
     try:
-        asyncio.run(serve_until_signal(paths, config, hosts))
+        asyncio.run(serve_until_signal(paths, config, hosts, is_mock=args.mock))
     except OSError as exc:
         print(f"lapis-daemon: {exc} (set LAPIS_CONFIG_DIR for a rootless run)", file=sys.stderr)
         return 1

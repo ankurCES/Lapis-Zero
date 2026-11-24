@@ -95,16 +95,28 @@ state IDLE→kill_all toast; reconnect re-sync measured 0.001s. STOP for Phase 3
 
 **Deliverables**
 
-- [ ] `kvm/vnc_driver.py` (asyncvnc, Pillow downscale, coordinate transform, 1-bit 120×68 crosshair thumbnail, modifier key-up cleanup)
-- [ ] `kvm/ssh_driver.py` (asyncssh, timeout + 4 KB truncation)
-- [ ] `llm/anthropic_cua.py` behind `llm/base.py`, dHash stuck detection, `agent/scheduler.py`
+- [x] `kvm/vnc_driver.py` (asyncvnc, Pillow downscale, coordinate transform, 1-bit 120×68 crosshair thumbnail, modifier key-up cleanup)
+- [x] `kvm/ssh_driver.py` (asyncssh, timeout + 4 KB truncation)
+- [x] `llm/anthropic_cua.py` behind `llm/base.py`, dHash stuck detection, `agent/scheduler.py`
 
 **Acceptance criteria**
 
-- [ ] Unit tests pass: coordinate math, 1020-byte 1-bit thumbnail packing, dHash stuck detection, policy tiers
-- [ ] Live Tailscale host test completes a multi-step GUI + SSH task with daemon peak RSS < 130 MB
+- [x] Unit tests pass: coordinate math, 1020-byte 1-bit thumbnail packing, dHash stuck detection, policy tiers
+- [ ] Live Tailscale host test completes a multi-step GUI + SSH task with daemon peak RSS < 130 MB  — _BLOCKED (needs live Tailscale VNC/SSH host + API key; not available in this environment)_
 
-**Report:** _pending_
+**Report:** 2026-11-24 — Phase 3 complete (code + unit gates). Added `agent/dhash.py`
+(`StuckDetector`: threshold 3, hamming ≤2, corrective hint, pause after passing max_retries),
+`kvm/vnc_driver.py` (pure helpers `downscale_dims`/`to_vnc_coords`/`compute_crop_box`/
+`build_preview_1bit`/`pack_bits_msb` + lazy `VncDriver` with modifier key-up cleanup and JPEG
+downscale pipeline that frees raw buffers), `kvm/ssh_driver.py` (`truncate_output` + lazy
+`SshDriver` 30 s timeout), `llm/{base,anthropic_cua}.py` (unified tool surface, Claude CUA
+adapter, lazy `anthropic`), `agent/scheduler.py` (5-field cron parse + asyncio runner),
+`CompositeHostDriver`/`build_host_driver` in `kvm/base.py`, `StuckDetector` wired into
+`runner.py`, real driver factory + cron scheduler in `main.py`, `pillow` dep + `kvm` extra.
+Commands (all pass): `uv run pytest` 53 passed, `uv run ruff check`/`format --check` clean,
+`cargo test` 32 passed, `cargo clippy --all-targets -- -D warnings`, `cargo fmt --check`,
+6× `--dump-frame` (320×170 RGB), live mock E2E over the socket, real `build_host_driver`
+factory verifies a lazily-built `CompositeHostDriver`. STOP for Phase 4.
 
 ---
 

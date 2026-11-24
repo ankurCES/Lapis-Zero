@@ -9,6 +9,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+from lapis_daemon.agent.dhash import StuckDetector
 from lapis_daemon.agent.policy import Policy, PolicyTier, is_read_only_ssh
 from lapis_daemon.config import HostsConfig
 from lapis_daemon.db import LapisDb
@@ -83,6 +84,7 @@ class TaskRunner:
         self._seq = 0
         self._req_n = 0
         self._current: ScriptStep | None = None
+        self.stuck = StuckDetector()
 
     @property
     def is_running(self) -> bool:
@@ -104,6 +106,7 @@ class TaskRunner:
         task_id = f"t_{time.time_ns() % 100000}"
         self.active_task = {"id": task_id, "title": prompt, "step": 0, "max_steps": self.max_steps}
         self._seq = 0
+        self.stuck.reset()
         await self.db.insert_task(task_id, host, prompt, policy.tier.value, time.time())
         await self._record("prompt", prompt, f"Task queued for {host}", "ok")
         self._set_state("THINKING")
@@ -240,6 +243,20 @@ class TaskRunner:
                     break
                 self._set_state("ACTING")
                 await self._execute(driver, step)
+                # dHash stuck-loop detection after each mutating action (SPEC 7.3).
+                # MockHostDriver has no real frames: only feed real drivers' hashes.
+                frame_hash = None
+                if hasattr(driver, "vnc"):
+                    frame_hash = getattr(driver.vnc, "last_frame_hash", None)
+                if frame_hash is not None:
+                    hint = self.stuck.update(frame_hash)
+                    if hint:
+                        self.emit_toast("warn", hint)
+                        self._set_state("THINKING")
+                if self.stuck.should_pause:
+                    self.emit_toast("warn", "Stuck loop persists; paused for manual review")
+                    self._set_state("PAUSED")
+                    await self._resume.wait()
                 await asyncio.sleep(self.step_delay)
         except Exception as exc:  # a broken step must not leave the agent stuck mid-task
             status = "failed"
