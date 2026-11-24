@@ -1,0 +1,84 @@
+# Lapis-Zero OS — Core Daemon & UI Configuration Example
+#
+# Installation:
+#   Copy this file to /etc/lapis/lapis.toml on the CardputerZero, OR place it
+#   into the FAT32 boot partition at /boot/firmware/lapis-seed/lapis.toml so
+#   lapis-firstboot.service installs it automatically on first boot.
+#
+# Security:
+#   NEVER store API keys, VNC passwords, or Tailscale auth keys in this file.
+#   All secrets belong exclusively in /etc/lapis/secrets.env (chmod 600).
+
+[llm]
+# LLM Computer Use provider: "anthropic" | "openai" | "openrouter".
+provider = "anthropic"
+
+# Model identifier sent to the configured provider.
+model = "claude-sonnet-4-20250514"
+
+# Environment variable name in /etc/lapis/secrets.env holding the API key.
+api_key_env = "ANTHROPIC_API_KEY"
+
+# Maximum agent tool-call steps permitted per task before halting.
+max_steps = 25
+
+# HTTP request timeout (seconds) for each LLM turn.
+request_timeout_sec = 60
+
+[kvm]
+# Maximum screenshot dimensions sent to the LLM (aspect ratio preserved) to stay
+# within the 512 MB CardputerZero RAM budget.
+llm_max_width = 1280
+llm_max_height = 720
+
+# JPEG compression quality (1-100) for downscaled screenshots (~60-110 KB).
+jpeg_quality = 75
+
+# Disconnect idle on-demand VNC sessions after this many seconds.
+vnc_idle_disconnect_sec = 60
+
+# Stuck-loop detector: consecutive mutating actions producing near-identical
+# 64-bit dHash frames (Hamming distance <= stuck_hamming_max) trigger a hint.
+stuck_threshold = 3
+stuck_hamming_max = 2
+
+# Non-interactive SSH command timeout (seconds) and combined output byte cap.
+ssh_timeout_sec = 30
+ssh_output_truncate = 4096
+
+[voice]
+# Enable ALSA Push-to-Talk microphone capture and STT transcription (Phase 6).
+enabled = false
+
+# ALSA capture format for CardputerZero ES8389 MEMS microphone.
+sample_rate = 16000
+channels = 1
+
+[ui]
+# Display palette theme: "paper" (light e-paper) | "dark" (inverted).
+theme = "paper"
+
+# Adaptive frame governor rates (FPS) for battery and CPU conservation.
+frame_fps_active = 60
+frame_fps_agent = 12
+frame_fps_idle = 1
+
+[security]
+# Default approval policy tier when a host does not override it:
+# "strict" | "balanced" | "autonomous".
+approval_default_tier = "balanced"
+
+[cron]
+# Enable the asyncio background cron scheduler.
+enabled = true
+
+# Example scheduled job (set enabled = true to activate).
+[[cron.schedules]]
+name = "Daily Digest"
+# Standard 5-field cron expression (minute hour day-of-month month day-of-week).
+schedule = "0 8 * * *"
+# Target host key from /etc/lapis/hosts.toml.
+host = "macbook-pro"
+# Natural-language task prompt queued when the schedule triggers.
+prompt = "Check overnight CI runs and summarize any failures."
+enabled = false

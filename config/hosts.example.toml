@@ -1,0 +1,83 @@
+# Lapis-Zero OS — Tailscale Target Hosts Configuration Example
+#
+# Installation:
+#   Copy this file to /etc/lapis/hosts.toml on the CardputerZero, OR place it
+#   into the FAT32 boot partition at /boot/firmware/lapis-seed/hosts.toml so
+#   lapis-firstboot.service installs it automatically on first boot.
+#
+# Security:
+#   Do NOT put VNC passwords or SSH private keys in this file.
+#   Store VNC passwords in /etc/lapis/secrets.env (chmod 600) and reference
+#   them by environment variable name, and place SSH private keys in
+#   /etc/lapis/ (chmod 600).
+
+# ---------------------------------------------------------------------------
+# Host 1: macOS laptop reachable over Tailscale
+# ---------------------------------------------------------------------------
+[hosts.macbook-pro]
+# Human-readable host name shown in the Lapis-Zero status bar and menu.
+hostname = "macbook-pro"
+
+# Target machine's Tailscale IPv4 address (100.64.0.0/10 CGNAT range).
+# Bind the host's VNC server strictly to this Tailscale interface.
+tailscale_ip = "100.64.10.21"
+
+# Safety policy tier for actions targeting this host:
+#   "strict"     — every mutating VNC/SSH action requires on-device UI approval
+#   "balanced"   — read-only inspection auto-runs; destructive or high-risk actions prompt
+#   "autonomous" — auto-runs everything except hard-denylisted commands
+policy = "balanced"
+
+[hosts.macbook-pro.vnc]
+# TCP port of the target host's VNC / Screen Sharing server (default: 5900).
+port = 5900
+
+# VNC authentication username on the target host.
+username = "alice"
+
+# Environment variable name in /etc/lapis/secrets.env holding the VNC password.
+password_env = "LAPIS_VNC_PASSWORD_macbook_pro"
+
+[hosts.macbook-pro.ssh]
+# TCP port of the target host's SSH server (default: 22).
+port = 22
+
+# SSH login username on the target host.
+user = "alice"
+
+# Optional path to an SSH private key inside /etc/lapis/ (chmod 600).
+# Omit if authenticating via Tailscale SSH.
+# identity_file = "/etc/lapis/lapis_ed25519"
+
+# ---------------------------------------------------------------------------
+# Host 2: Linux developer workstation reachable over Tailscale
+# ---------------------------------------------------------------------------
+[hosts.arch-dev]
+# Human-readable host name shown in the Lapis-Zero status bar and menu.
+hostname = "arch-dev"
+
+# Target machine's Tailscale IPv4 address (100.64.0.0/10 CGNAT range).
+tailscale_ip = "100.64.20.42"
+
+# Safety policy tier: "strict" | "balanced" | "autonomous".
+policy = "strict"
+
+[hosts.arch-dev.vnc]
+# TCP port of the target host's VNC server (default: 5900).
+port = 5900
+
+# VNC authentication username on the target host.
+username = "dev"
+
+# Environment variable name in /etc/lapis/secrets.env holding the VNC password.
+password_env = "LAPIS_VNC_PASSWORD_arch_dev"
+
+[hosts.arch-dev.ssh]
+# TCP port of the target host's SSH server (default: 22).
+port = 22
+
+# SSH login username on the target host.
+user = "dev"
+
+# Optional SSH private key path (chmod 600 inside /etc/lapis/).
+identity_file = "/etc/lapis/lapis_ed25519"

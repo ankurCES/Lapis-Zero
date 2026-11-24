@@ -1,0 +1,45 @@
+{
+  "id": "swd-20261124-133617-171",
+  "version": 1,
+  "timestamp": "2026-11-24T13:36:17Z",
+  "request": "edit_file: ui/src/gfx/font.rs",
+  "summary": "edited ui/src/gfx/font.rs",
+  "file_count": 1,
+  "files": [
+    {
+      "path": "ui/src/gfx/font.rs",
+      "operation": "MODIFY",
+      "status": "verified",
+      "detail": "verified: d44d5c7bd13aad44",
+      "before": {
+        "path": "/Users/ankur/AI_EXPERIMENTS/Lapis-Zero/ui/src/gfx/font.rs",
+        "exists": true,
+        "size": 5718,
+        "mtime": 1795527211527,
+        "sha256": "12e65594e45cea577c15aeaf30c95b50b1a90223d035dcc2f1e5bfc6faacd871",
+        "mode": 420
+      },
+      "after": {
+        "path": "/Users/ankur/AI_EXPERIMENTS/Lapis-Zero/ui/src/gfx/font.rs",
+        "exists": true,
+        "size": 6920,
+        "mtime": 1795527377163,
+        "sha256": "d44d5c7bd13aad446582535813336397897030af0581886554bffc91720048af",
+        "mode": 420
+      }
+    }
+  ],
+  "swd": {
+    "success": true,
+    "rolled_back": false,
+    "rollback_status": "not-needed"
+  },
+  "chain": {
+    "seq": 3,
+    "prev_hash": "5f3facaa4aab39075af147ee2f7325e7b76ae284058c9d048aed9b66d8f3c113"
+  },
+  "integrity": {
+    "sha256": "ef01841427cfd8bff4fc3fcd0829c36153b191faebd8c6a8eb5549a94cfd173c"
+  },
+  "duration_ms": 16
+}

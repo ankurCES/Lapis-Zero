@@ -1,0 +1,44 @@
+{
+  "id": "swd-20261124-132942-148",
+  "version": 1,
+  "timestamp": "2026-11-24T13:29:42Z",
+  "request": "write_file: Makefile",
+  "summary": "wrote 2197 bytes to Makefile",
+  "file_count": 1,
+  "files": [
+    {
+      "path": "Makefile",
+      "operation": "CREATE",
+      "status": "verified",
+      "detail": "verified: a26a8f8c29982fa1",
+      "before": {
+        "path": "/Users/ankur/AI_EXPERIMENTS/Lapis-Zero/Makefile",
+        "exists": false,
+        "size": 0,
+        "mtime": -62135596800000,
+        "sha256": ""
+      },
+      "after": {
+        "path": "/Users/ankur/AI_EXPERIMENTS/Lapis-Zero/Makefile",
+        "exists": true,
+        "size": 2197,
+        "mtime": 1795526982137,
+        "sha256": "a26a8f8c29982fa1681dc2b3efacc747df60fb30d4cd6a1d2c2bd9ff84803658",
+        "mode": 420
+      }
+    }
+  ],
+  "swd": {
+    "success": true,
+    "rolled_back": false,
+    "rollback_status": "not-needed"
+  },
+  "chain": {
+    "seq": 0,
+    "prev_hash": ""
+  },
+  "integrity": {
+    "sha256": "62b3ae792451167a44074265df817e748b1f3a3dc3f78e8d4da4a730b688415d"
+  },
+  "duration_ms": 22
+}
