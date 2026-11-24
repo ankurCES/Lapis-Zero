@@ -1,0 +1,15 @@
+[Unit]
+Description=Lapis-Zero first-boot seed importer
+Requires=local-fs.target
+After=local-fs.target network-online.target
+Before=lapis-daemon.service lapis-ui.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/lib/lapis/lapis-firstboot.sh
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

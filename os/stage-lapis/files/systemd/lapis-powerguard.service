@@ -1,0 +1,9 @@
+[Unit]
+Description=Lapis-Zero battery power guard (shutdown when critical + not charging)
+After=lapis-firstboot.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/lapis/lapis-powerguard.sh
+StandardOutput=journal
+StandardError=journal

@@ -1,0 +1,15 @@
+[Unit]
+Description=Lapis-Zero software KVM agent daemon
+After=lapis-firstboot.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/opt/lapis/venv/bin/lapis-daemon
+Restart=on-failure
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

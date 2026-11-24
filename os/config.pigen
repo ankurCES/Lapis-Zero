@@ -1,0 +1,36 @@
+# Lapis-Zero OS — pi-gen build configuration fragment.
+#
+# This file is sourced by pi-gen's build.sh (either directly via `-c` or by
+# `build-docker.sh` mounting it at /config and rewriting `-c <path>` to
+# `-c /config`). It deliberately does NOT define IMAGE_TOTAL_SIZE: per
+# SPEC.md 4.1 we leave it unset so export-image auto-sizes a tight ext4 rootfs
+# and the standard pi-gen first-boot flow grows it on the card.
+
+# Friendly name of the OS (used verbatim in image filenames).
+IMG_NAME=lapis-zero
+
+# pi-gen's export-image stage names the final image from these:
+#   ${IMG_DATE}-${IMG_NAME}${IMG_SUFFIX}.img(.xz)
+IMG_DATE=${IMG_DATE:-$(date +%Y-%m-%d)}
+
+# Only the headless CardputerZero hardware BSP (stage0..stage2) plus our custom
+# stage-lapis.  Stage3/stage4/stage5 are the desktop/launcher stages and are
+# never built.
+STAGE_LIST="stage0 stage1 stage2 stage-lapis"
+
+# Debian release; the CardputerZero pi-gen branch is trixie.
+RELEASE=trixie
+ARCH=arm64
+
+# Compress the final image with xz -T0 (SPEC.md 4.1) instead of pi-gen's
+# default zip.
+DEPLOY_COMPRESSION=xz
+COMPRESSION_LEVEL=6
+
+# Let pi-gen's first-boot resize handle the root partition; we do not pin a
+# fixed-image size (see header).
+# IMAGE_TOTAL_SIZE is intentionally unset.
+
+# Pi-gen defaults we accept verbatim:
+#   USE_QEMU is managed by build-docker.sh (QEMU user binfmt on non-aarch64).
+#   RANDOMIZE_DISK_ID_ON_FIRST_BOOT defaults to 1 in build.sh.

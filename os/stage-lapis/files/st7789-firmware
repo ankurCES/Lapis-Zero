@@ -1,0 +1,27 @@
+#!/bin/sh -e
+# initramfs-tools hook: keep the CardputerZero LCD firmware blob bundled in the
+# initramfs so the st7789v display driver can bring the SPI panel up before the
+# root filesystem is mounted (mirrored framebuffer splash -> lapis-ui).
+
+PREREQ=""
+prereqs() { echo "$PREREQ"; }
+
+case "$1" in
+    prereqs)
+        prereqs
+        exit 0
+        ;;
+esac
+
+# shellcheck source=/dev/null  # provided by initramfs-tools in the target rootfs
+. /usr/share/initramfs-tools/hook-functions
+
+# The blob shipped by the cardputerzero BSP (stage2/05-cardputerzero).
+FIRMWARE="cardputerzero,st7789v_lcd.bin"
+SRC="/lib/firmware/${FIRMWARE}"
+
+if [ -f "${SRC}" ]; then
+    copy_file firmware "${SRC}"
+else
+    echo "WARNING: ${SRC} not found; initramfs will lack st7789 LCD firmware" >&2
+fi

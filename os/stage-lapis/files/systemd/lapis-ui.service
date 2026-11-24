@@ -1,0 +1,16 @@
+[Unit]
+Description=Lapis-Zero framebuffer UI
+After=lapis-firstboot.service systemd-journald.service
+Requires=dev-fb0.device
+After=dev-fb0.device
+
+[Service]
+Type=simple
+ExecStart=/opt/lapis/bin/lapis-ui --fb
+Restart=on-failure
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

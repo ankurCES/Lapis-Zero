@@ -1,0 +1,9 @@
+[Unit]
+Description=Lapis-Zero battery power guard schedule
+
+[Timer]
+OnBootSec=60s
+OnUnitActiveSec=30s
+
+[Install]
+WantedBy=multi-user.target

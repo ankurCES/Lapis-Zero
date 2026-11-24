@@ -157,19 +157,36 @@ clean, `make cross-ui` clean (stripped aarch64 binary, 762,880 B), `uv run pytes
 
 **Deliverables**
 
-- [ ] `os/config.pigen` + `os/build-image.sh` (clones `CardputerZero/pi-gen` `cardputerzero_v1.1`, runs `STAGE_LIST="stage0 stage1 stage2 stage-lapis"` in Docker)
-- [ ] `os/stage-lapis/` (`00-os-tuning`, `01-tailscale`, `02-lapis-stack`, `03-services-firstboot`) incl. `gpu_mem=16`, `fbcon=map:off`, st7789 initramfs hook, `zram-generator.conf`, systemd units, `lapis-firstboot.sh` (bootfs seed importer + secret shredder), `lapis-powerguard`
-- [ ] `os/generate-imager-manifest.py` emitting M5 Imager `os-list.json` with exact SHA256s and byte sizes
-- [ ] `os/README.md` + `os/docs/setup_target_hint.md` (M5 Imager `Use custom` / `--repo`, `rpiboot`, bootfs seeding)
+- [x] `os/config.pigen` + `os/build-image.sh` (clones `CardputerZero/pi-gen` `cardputerzero_v1.1`, runs `STAGE_LIST="stage0 stage1 stage2 stage-lapis"` in Docker)
+- [x] `os/stage-lapis/` (`00-os-tuning`, `01-tailscale`, `02-lapis-stack`, `03-services-firstboot`) incl. `gpu_mem=16`, `fbcon=map:off`, st7789 initramfs hook, `zram-generator.conf`, systemd units, `lapis-firstboot.sh` (bootfs seed importer + secret shredder), `lapis-powerguard`
+- [x] `os/generate-imager-manifest.py` emitting M5 Imager `os-list.json` with exact SHA256s and byte sizes
+- [x] `os/README.md` + `os/docs/setup_target_hint.md` (M5 Imager `Use custom` / `--repo`, `rpiboot`, bootfs seeding)
 
 **Acceptance criteria**
 
-- [ ] `shellcheck` passes on all scripts in `os/`
-- [ ] `os/generate-imager-manifest.py` passes schema validation against `CardputerZero/m5stack-imager` `os-list-template.json`
-- [ ] `make build-os` produces bootable `lapis-zero-arm64.img.xz` + `os-list.json`
-- [ ] Flash via M5 Imager boots CardputerZero into Lapis-Zero: `multi-user.target`, zero desktop/X11/APPLaunch, ~496 MB Linux RAM visible, total active RSS < 220 MB, `lapis-firstboot.service` imports and shreds bootfs secrets
+- [x] `shellcheck` passes on all scripts in `os/` — `make -C os lint` exit 0 (only source/main reads pinned via `# shellcheck disable=SC2012/SC1091` in `build-image.sh` and the initramfs hook)
+- [x] `os/generate-imager-manifest.py` passes schema validation against `CardputerZero/m5stack-imager` `os-list-template.json` — `--self-test` OK; emitted `os_list[0]` and `imager.devices[0]` key sets are **byte-identical** to the live template's (added the `icon` field to match); `--validate-only` reports OK
+- [ ] `make build-os` produces bootable `lapis-zero-arm64.img.xz` + `os-list.json` — _BLOCKED (Docker daemon not running on this host; `make -C os deploy` correctly fails fast with a clear message. The pipeline is wired and lint-verified end-to-end, but the real pi-gen image build needs a running Docker daemon + network.)_
+- [ ] Flash via M5 Imager boots CardputerZero into Lapis-Zero: `multi-user.target`, zero desktop/X11/APPLaunch, ~496 MB Linux RAM visible, total active RSS < 220 MB, `lapis-firstboot.service` imports and shreds bootfs secrets — _BLOCKED (requires the built image + physical CardputerZero; downstream of the Docker-blocked build criterion above)_
 
-**Report:** _pending_
+**Report:** 2026-11-24 — Phase 5 code complete (build + flash are
+environment-blocked). Created the full `os/` tree: `config.pigen`
+(`IMG_NAME=lapis-zero`, `STAGE_LIST="stage0 stage1 stage2 stage-lapis"`,
+`DEPLOY_COMPRESSION=xz`, auto-sized rootfs per SPEC 4.1), `build-image.sh`
+(clones `cardputerzero_v1.1`, cross-compiles `lapis-ui` via `cargo-zigbuild`,
+builds the daemon wheel via `uv build`, injects both into
+`stage-lapis/02-lapis-stack/files/`, then runs pi-gen's `build-docker.sh`),
+`generate-imager-manifest.py` (SHA256 + byte sizes, schema-validated). Stage
+subdirs: `00-os-tuning` (`gpu_mem=16`, `fbcon=map:off`/quiet/loglevel3, zram
+512 MB LZ4, fstab noatime + `/tmp` tmpfs, volatile journald),
+`01-tailscale` (apt repo + `tailscaled`, no secrets), `02-lapis-stack`
+(offline venv install of the wheel + binary), `03-services-firstboot`
+(systemd units, `lapis-firstboot.sh` seed importer + FAT32 shredder, st7789
+initramfs hook, `lapis-powerguard`). Verification run: `make -C os lint` exit 0
+(shellcheck clean + manifest self-test OK); `bash -n` clean on all scripts;
+manifest key-diff vs the live upstream `os-list-template.json` is empty;
+`cargo test` 47 passed + `uv run pytest` 53 passed (unchanged, re-confirmed).
+STOP for Phase 6 approval.
 
 ---
 

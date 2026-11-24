@@ -69,10 +69,10 @@ cross-ui:
 	@test -f $(OUT_BIN) && ls -l $(OUT_BIN)
 
 build-os:
-	@echo "build-os: lands in Phase 5 (pi-gen + CardputerZero BSP in Docker)"
+	$(MAKE) -C os deploy
 
 manifest:
-	@echo "manifest: lands in Phase 5 (os/generate-imager-manifest.py)"
+	$(MAKE) -C os manifest
 
 clean:
 	$(CARGO) clean --manifest-path ui/Cargo.toml 2>/dev/null || true
