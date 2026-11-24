@@ -3,3 +3,5 @@
 pub mod canvas;
 pub mod font;
 pub mod font_data;
+pub mod mascot;
+pub mod spring;

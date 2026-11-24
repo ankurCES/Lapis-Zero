@@ -1,7 +1,7 @@
 //! Desktop SDL2 simulator: 320x170 canvas shown 3x (960x510) with nearest scaling.
 
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use sdl2::event::Event;
 use sdl2::keyboard::Keycode;
@@ -15,8 +15,6 @@ use crate::gfx::canvas::{Canvas, HEIGHT, WIDTH};
 
 /// Integer upscale factor for the simulator window.
 const SCALE: u32 = 3;
-/// 60 FPS frame budget.
-const FRAME: Duration = Duration::from_micros(16_667);
 
 /// SDL2 window + streaming texture implementing both backend traits.
 pub struct SimBackend {
@@ -43,8 +41,6 @@ impl SimBackend {
             .build()
             .map_err(|e| e.to_string())?;
         let window = win.into_canvas().build().map_err(|e| e.to_string())?;
-        // ponytail: `unsafe_textures` drops the creator lifetime; the single texture
-        // lives for the whole process, so it is never explicitly destroyed.
         let texture = window
             .texture_creator()
             .create_texture_static(PixelFormatEnum::ARGB8888, WIDTH as u32, HEIGHT as u32)
@@ -65,23 +61,24 @@ impl SimBackend {
         })
     }
 
-    /// Runs at 60 FPS until the window closes: each tick drains one key, calls
-    /// `draw(canvas, key)`, then presents. Sleeps to the next tick (no busy wait).
-    pub fn run_forever(&mut self, draw: &mut dyn FnMut(&mut Canvas, Option<LapisKey>)) {
-        let mut canvas = Canvas::new();
-        let mut next = Instant::now();
-        while !self.quit {
-            let key = self.poll_event();
-            draw(&mut canvas, key);
-            self.push_frame(&canvas);
-            next += FRAME;
-            let now = Instant::now();
-            if next > now {
-                thread::sleep(next - now);
-            } else {
-                next = now;
-            }
-        }
+    /// True once the user closed the window.
+    pub fn should_quit(&self) -> bool {
+        self.quit
+    }
+
+    /// Drains and returns the next pending key, flipping the quit flag on close.
+    pub fn poll(&mut self) -> Option<LapisKey> {
+        <Self as InputBackend>::poll_event(self)
+    }
+
+    /// Presents a finished frame (scaled 3x with nearest neighbour).
+    pub fn present(&mut self, canvas: &Canvas) {
+        <Self as DisplayBackend>::push_frame(self, canvas);
+    }
+
+    /// Sleeps `iv` between frames (the adaptive governor supplies it).
+    pub fn throttle(&mut self, iv: Duration) {
+        thread::sleep(iv);
     }
 }
 
@@ -136,7 +133,6 @@ fn map_key(k: Keycode) -> Option<LapisKey> {
         Keycode::RETURN => LapisKey::Enter,
         Keycode::ESCAPE => LapisKey::Esc,
         Keycode::TAB => LapisKey::Tab,
-        // ponytail: unshifted keycodes only; Prompt view (Phase 1) switches to TextInput.
         _ => match k.into_i32() {
             c @ 0x20..=0x7E => LapisKey::Char(c as u8 as char),
             _ => return None,

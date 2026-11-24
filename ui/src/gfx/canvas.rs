@@ -50,6 +50,29 @@ impl Canvas {
         &self.buf
     }
 
+    /// Copies `src` into this canvas with its top-left at `(dx, dy)`, row by row.
+    ///
+    /// Used for horizontal view slides. Pixels whose source row intersects the
+    /// canvas are copied; rows outside it are skipped. Never allocates.
+    pub fn blit(&mut self, src: &Canvas, dx: i32, dy: i32) {
+        let sx = dx.max(0);
+        let ex = (dx + WIDTH).min(WIDTH);
+        if sx >= ex {
+            return;
+        }
+        let sw = (ex - sx) as usize * 3;
+        let src_off = (sx - dx) as usize * 3;
+        for y in 0..HEIGHT {
+            let ty = dy + y;
+            if !(0..HEIGHT).contains(&ty) {
+                continue;
+            }
+            let src_row = (y * WIDTH * 3) as usize + src_off;
+            let dst_row = (ty * WIDTH * 3) as usize + sx as usize * 3;
+            self.buf[dst_row..dst_row + sw].copy_from_slice(&src.buf[src_row..src_row + sw]);
+        }
+    }
+
     /// Returns the color at `(x, y)`, or `None` if out of bounds.
     pub fn get_pixel(&self, x: i32, y: i32) -> Option<u32> {
         if !(0..WIDTH).contains(&x) || !(0..HEIGHT).contains(&y) {
@@ -211,6 +234,21 @@ mod tests {
                 assert_eq!(c.get_pixel(x + 4, y), Some(PAPER));
             }
         }
+    }
+
+    #[test]
+    fn blit_copies_and_clips() {
+        let mut src = Canvas::new();
+        for x in 0..WIDTH {
+            src.set_pixel(x, 80, ACCENT_BLUE);
+        }
+        let mut dst = Canvas::new();
+        dst.blit(&src, -10, 0);
+        // Source row y=80 is fully accent; shifting left 10 copies src cols
+        // 10..=319 into dst cols 0..=309, leaving dst 310..=319 paper.
+        assert_eq!(dst.get_pixel(0, 80), Some(ACCENT_BLUE));
+        assert_eq!(dst.get_pixel(309, 80), Some(ACCENT_BLUE));
+        assert_eq!(dst.get_pixel(310, 80), Some(PAPER));
     }
 
     #[test]

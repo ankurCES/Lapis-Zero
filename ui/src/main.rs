@@ -1,11 +1,11 @@
-//! `lapis-ui`: Lapis-Zero OS 320x170 UI. Phase 0 CLI: `--sim` and `--dump-frame`.
+//! `lapis-ui`: Lapis-Zero OS 320x170 UI. Phase 1 CLI: `--sim`, `--demo`, `--dump-frame`.
 
 use std::fs::File;
 use std::io::BufWriter;
 use std::process::ExitCode;
 
 use lapis_ui::gfx::canvas::{Canvas, HEIGHT, WIDTH};
-use lapis_ui::views::{self, View};
+use lapis_ui::views::{App, View, DUMP_CLOCK};
 
 const HELP: &str = "\
 lapis-ui - Lapis-Zero OS display UI
@@ -16,7 +16,7 @@ USAGE:
 
 OPTIONS:
     --sim                 Open the 960x510 SDL2 desktop simulator
-    --demo                Demo data mode (label only in Phase 0)
+    --demo                Demo data mode (state cycling + synthetic approval modal)
     --fb                  /dev/fb0 backend (Phase 4)
     --socket <path>       Daemon IPC socket (Phase 2)
     --dump-frame <path>   Render one 320x170 frame to an RGB PNG and exit
@@ -80,8 +80,17 @@ fn main() -> ExitCode {
     };
 
     if let Some(path) = args.dump {
+        let mut app = App::new();
+        app.set_view(view);
+        if view == View::Approval {
+            app.show_synthetic_approval();
+        }
+        // Settled, deterministic snapshot: pinned desk clock, no slide/motion,
+        // and any modal snap-rested so borders/preview land predictably.
+        app.settle_all();
+        app.tick(1.0 / 60.0, DUMP_CLOCK as f32 * 60.0);
         let mut canvas = Canvas::new();
-        views::render(&mut canvas, view);
+        app.render(&mut canvas);
         return match write_png(&path, &canvas) {
             Ok(()) => {
                 println!("wrote {path} ({WIDTH}x{HEIGHT}, view {})", view.name());
@@ -95,10 +104,7 @@ fn main() -> ExitCode {
     }
 
     if args.sim {
-        if args.demo {
-            println!("lapis-ui: --demo (Phase 0: label only)");
-        }
-        return run_sim(view);
+        return run_sim(view, args.demo);
     }
 
     print!("{HELP}");
@@ -121,8 +127,10 @@ fn write_png(path: &str, canvas: &Canvas) -> Result<(), Box<dyn std::error::Erro
 }
 
 #[cfg(feature = "sim")]
-fn run_sim(mut view: View) -> ExitCode {
-    use lapis_ui::backend::{sdl_sim::SimBackend, LapisKey};
+fn run_sim(view: View, demo: bool) -> ExitCode {
+    use lapis_ui::backend::sdl_sim::SimBackend;
+    use std::time::Instant;
+
     let mut sim = match SimBackend::new() {
         Ok(s) => s,
         Err(e) => {
@@ -130,18 +138,36 @@ fn run_sim(mut view: View) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    sim.run_forever(&mut |canvas, key| {
-        match key {
-            Some(LapisKey::CycleL) => view = view.cycle(-1),
-            Some(LapisKey::CycleR) => view = view.cycle(1),
-            _ => {}
+    let mut app = App::new();
+    app.set_view(view);
+    let start = Instant::now();
+    let mut prev_now = 0.0f32;
+    let mut canvas = Canvas::new();
+
+    loop {
+        if sim.should_quit() {
+            break;
         }
-        views::render(canvas, view);
-    });
+        let now = start.elapsed().as_secs_f32();
+        let dt = (now - prev_now).clamp(0.0, 0.1);
+        prev_now = now;
+        // Drain at most one key per frame; the rest queue in SDL.
+        if let Some(k) = sim.poll() {
+            app.key(k);
+        }
+        if demo {
+            app.demo_tick(now);
+        }
+        app.tick(dt, now);
+        app.render(&mut canvas);
+        sim.present(&canvas);
+        let iv = app.frame_interval();
+        sim.throttle(iv);
+    }
     ExitCode::SUCCESS
 }
 
 #[cfg(not(feature = "sim"))]
-fn run_sim(_view: View) -> ExitCode {
+fn run_sim(_view: View, _demo: bool) -> ExitCode {
     usage_err("built without the `sim` feature; rebuild with default features")
 }

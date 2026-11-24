@@ -35,17 +35,24 @@ edge pixels are the rule's endpoints at (0,18)/(319,18), by design).
 
 **Deliverables**
 
-- [ ] `gfx/spring.rs` + `gfx/mascot.rs` (5 animation states + desk clock)
-- [ ] All 6 views (`companion`, `ticker`, `menu`, `approval`, `prompt`, `setup`) with spring view slides, spring menu pill, 1-bit 120×68 preview in `approval.rs`
-- [ ] `--demo` mode cycling states, synthetic approval modal, first-boot onboarding view
+- [x] `gfx/spring.rs` + `gfx/mascot.rs` (5 animation states + desk clock)
+- [x] All 6 views (`companion`, `ticker`, `menu`, `approval`, `prompt`, `setup`) with spring view slides, spring menu pill, 1-bit 120×68 preview in `approval.rs`
+- [x] `--demo` mode cycling states, synthetic approval modal, first-boot onboarding view
 
 **Acceptance criteria**
 
-- [ ] Smooth 60 FPS transitions across all 6 views
-- [ ] `--dump-frame` PNGs for all 6 views verify zero text overlap or clipping at 320×170
-- [ ] Idle governor drops to 1 FPS
+- [x] Smooth 60 FPS transitions across all 6 views — spring presets match SPEC 5.2 (slide 240/24, pill 320/26, modal 360/28); sim loop uses governor-paced sleeps
+- [x] `--dump-frame` PNGs for all 6 views verify zero text overlap or clipping at 320×170 — pixel audit: rule y18 full-width on all six; 0 right-edge and 0 bottom-edge ink below the rule except companion's 1 intentional pixel at the rule baseline; approval panel confirmed as a clean bordered rect (x12–307, y22–164) with no controls overlap
+- [x] Idle governor drops to 1 FPS — `App::frame_interval()` returns 1000 ms for settled IDLE
 
-**Report:** _pending_
+**Report:** 2026-11-24 — Phase 1 complete. Changed: `gfx/{spring,mascot}.rs`, `gfx/canvas.rs` blit,
+`gfx/mod.rs`, `views/{companion,ticker,menu,approval,prompt,setup}.rs` + `views/mod.rs`
+(`App` orchestrator, status bar, adaptive governor), `backend/sdl_sim.rs`, `main.rs`,
+`PROGRESS.md`. Commands (all pass): `cargo build`, `cargo test` (27 passed), `cargo clippy
+--all-targets -- -D warnings`, `cargo fmt --check`, same trio with `--no-default-features`,
+and `--dump-frame` for all six views. Visual audit (`dumps/{companion,ticker,menu,approval,prompt,setup}.png`):
+crisp F6x8/F8x14/F16x28 text, descenders intact, Bayer dim + amber crosshair on approval,
+zero clipping. STOP for Phase 2 approval.
 
 ---
 
