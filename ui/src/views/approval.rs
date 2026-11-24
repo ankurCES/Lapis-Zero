@@ -17,6 +17,16 @@ pub enum ActionKind {
 }
 
 impl ActionKind {
+    /// Parses a SPEC 6.1 `approval_request.action` string.
+    pub fn from_action(action: &str) -> Self {
+        match action {
+            "vnc_click" => ActionKind::VncClick,
+            "vnc_type" => ActionKind::VncType,
+            "ssh_exec" => ActionKind::SshExec,
+            _ => ActionKind::SshExec,
+        }
+    }
+
     fn label(self) -> &'static str {
         match self {
             ActionKind::VncClick => "VNC CLICK",
@@ -28,13 +38,14 @@ impl ActionKind {
 
 /// One pending approval request.
 pub struct Approval {
+    pub request_id: String,
     pub kind: ActionKind,
-    pub host: &'static str,
-    pub summary: &'static str,
-    pub risk: &'static str,
+    pub host: String,
+    pub summary: String,
+    pub risk: String,
     /// Base64 string (empty if no preview, e.g. SSH exec).
-    pub preview_b64: &'static str,
-    /// Spring pop-in progress (1.0 = fully shown).
+    pub preview_b64: String,
+    /// Spring pop-in progress (0.0 = fully shown, 1.0 = hidden).
     pub pop: Spring,
 }
 
@@ -42,11 +53,12 @@ impl Approval {
     /// A modal at rest (used when the view is opened directly for dumps).
     pub fn empty() -> Self {
         Self {
+            request_id: String::new(),
             kind: ActionKind::SshExec,
-            host: "macbook-pro",
-            summary: "systemctl restart worker",
-            risk: "high",
-            preview_b64: "",
+            host: "macbook-pro".to_string(),
+            summary: "systemctl restart worker".to_string(),
+            risk: "high".to_string(),
+            preview_b64: String::new(),
             pop: Spring::new(360.0, 28.0, 0.0),
         }
     }
@@ -55,18 +67,39 @@ impl Approval {
     pub fn synthetic() -> Self {
         let preview = synthetic_preview_b64();
         Self {
+            request_id: String::new(),
             kind: ActionKind::VncClick,
-            host: "macbook-pro",
-            summary: "Click Delete Repository at (612, 304)",
-            risk: "high",
-            preview_b64: preview,
+            host: "macbook-pro".to_string(),
+            summary: "Click Delete Repository at (612, 304)".to_string(),
+            risk: "high".to_string(),
+            preview_b64: preview.to_string(),
+            pop: Spring::new(360.0, 28.0, 1.0),
+        }
+    }
+
+    /// Constructs a live approval modal from a daemon `approval_request` payload.
+    pub fn from_request(
+        request_id: String,
+        kind: ActionKind,
+        host: String,
+        summary: String,
+        risk: String,
+        preview_b64: String,
+    ) -> Self {
+        Self {
+            request_id,
+            kind,
+            host,
+            summary,
+            risk,
+            preview_b64,
             pop: Spring::new(360.0, 28.0, 1.0),
         }
     }
 
     /// Records a decision so the coordinator can release the modal.
     pub fn finish(&mut self, _decision: &str) {
-        // Decision routing arrives with IPC (Phase 2); here the modal just marks done.
+        self.pop.set_target(1.0);
     }
 
     /// Snaps the pop-in spring to rest (fully shown) for deterministic frames.
@@ -77,6 +110,9 @@ impl Approval {
 
 /// The 1-bit 120x68 preview, packed MSB-first into `120*68/8 = 1020` bytes.
 pub fn render_preview(canvas: &mut Canvas, x: i32, y: i32, packed: &[u8]) {
+    if packed.len() < 1020 {
+        return;
+    }
     // Draw the preview cells with the accent crosshair inverted as an overlay.
     for py in 0..68i32 {
         for px in 0..120i32 {
@@ -134,12 +170,13 @@ pub fn render(canvas: &mut Canvas, a: &Approval) {
 
     // Host and risk on the same baseline as the badge's right side.
     let mut hb = [0u8; 40];
-    let h = super::fmt_into(&mut hb, &["host:", a.host, "  risk:", a.risk]);
+    let h = super::fmt_into(&mut hb, &["host:", &a.host, "  risk:", &a.risk]);
     draw_text(canvas, tx + bw + 8, py + 7, h, Font::F6x8, INK);
 
     // Summary (F6x8 so long action summaries wrap within the panel width).
+    let max_lines = if a.preview_b64.is_empty() { 4 } else { 2 };
     let mut sy = py + 22;
-    for line in wrap_text(a.summary, 42) {
+    for line in wrap_text(&a.summary, 42).into_iter().take(max_lines) {
         draw_text(canvas, tx, sy, &line, Font::F6x8, INK);
         sy += 10;
     }

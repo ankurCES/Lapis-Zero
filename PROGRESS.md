@@ -60,16 +60,34 @@ zero clipping. STOP for Phase 2 approval.
 
 **Deliverables**
 
-- [ ] `db.py` (SQLite WAL), `config.py`, `system_status.py`, `ipc_server.py`
-- [ ] `ui/src/ipc.rs` with non-blocking reads + automatic reconnect
-- [ ] `agent/runner.py`, `agent/policy.py`, `MockHostDriver`
+- [x] `db.py` (SQLite WAL), `config.py`, `system_status.py`, `ipc_server.py`
+- [x] `ui/src/ipc.rs` with non-blocking reads + automatic reconnect
+- [x] `agent/runner.py`, `agent/policy.py`, `MockHostDriver`
 
 **Acceptance criteria**
 
-- [ ] `lapis-daemon --mock` + `lapis-ui --sim` executes a full task Prompt → SQLite → Ticker → Approval Modal → `ESC` kill-switch
-- [ ] Daemon restart auto-reconnects and re-syncs within 2 s
+- [x] `lapis-daemon --mock` + `lapis-ui --sim` executes a full task Prompt → SQLite → Ticker → Approval Modal → `ESC` kill-switch
+- [x] Daemon restart auto-reconnects and re-syncs within 2 s
 
-**Report:** _pending_
+**Report:** 2026-11-24 — Phase 2 complete. Daemon: `config.py` (pydantic
+v2 + TOML + `EffectivePaths`/`LAPIS_CONFIG_DIR` rootless override), `db.py`
+(SQLite WAL/NORMAL/busy_timeout=5000; `tasks`/`steps`/`schedules`),
+`system_status.py` (`state_sync` builder), `kvm/base.py`
+(`HostDriver` ABC + `MockHostDriver`), `agent/policy.py` (strict/balanced/
+autonomous + hard denylist), `agent/runner.py` (bounded step loop, policy gate,
+`asyncio.Future`-backed approvals, pause/resume/kill_all), `ipc_server.py`
+(Unix socket `0600`, NDJSON framing, immediate re-sync on connect, broadcast).
+UI: `ipc.rs` (`IpcClient` non-blocking poll + exp backoff 0.2s→2.0s,
+`DaemonState` merge, all SPEC §6 message builders), `LapisKey::EscHold`
+(ESC hold 1.5s → `kill_all`), `App::on_daemon_message` + `key()->Option<Value>`
+out-message transport, owned `String` host state, `--socket` in `main.rs`.
+Commands (all pass): `cargo test` 32 passed (both feature sets), `cargo clippy
+--all-targets -- -D warnings` clean (both), `cargo fmt --check` clean, `uv run
+pytest` 34 passed, `ruff check`/`ruff format --check` clean, 6× `--dump-frame`
+wrote 320×170 PNGs. Live end-to-end (real daemon over real socket): submit→
+activity_events[prompt,ssh_exec,vnc_click,type_text,ssh_exec]→approval_request
+(req_1 vnc_click high, 1020-byte preview b64)→approve_once→req_2 ssh_exec→deny→
+state IDLE→kill_all toast; reconnect re-sync measured 0.001s. STOP for Phase 3.
 
 ---
 

@@ -1,24 +1,26 @@
-//! `lapis-ui`: Lapis-Zero OS 320x170 UI. Phase 1 CLI: `--sim`, `--demo`, `--dump-frame`.
+//! `lapis-ui`: Lapis-Zero OS 320x170 UI. CLI: `--sim`, `--demo`, `--dump-frame`, `--socket`.
 
 use std::fs::File;
 use std::io::BufWriter;
 use std::process::ExitCode;
 
 use lapis_ui::gfx::canvas::{Canvas, HEIGHT, WIDTH};
+use lapis_ui::ipc::{selected_socket_path, IpcClient};
 use lapis_ui::views::{App, View, DUMP_CLOCK};
 
 const HELP: &str = "\
 lapis-ui - Lapis-Zero OS display UI
 
 USAGE:
-    lapis-ui [--sim] [--demo] [--view <name>]
-    lapis-ui --dump-frame <path.png> [--view <name>]
+    lapis-ui [--sim] [--demo] [--view <name>] [--socket <path>]
+    lapis-ui --dump-frame <path.png> [--view <name>] [--socket <path>]
 
 OPTIONS:
     --sim                 Open the 960x510 SDL2 desktop simulator
     --demo                Demo data mode (state cycling + synthetic approval modal)
     --fb                  /dev/fb0 backend (Phase 4)
-    --socket <path>       Daemon IPC socket (Phase 2)
+    --socket <path>       Daemon IPC socket (default /run/lapis/lapisd.sock on Linux,
+                          /tmp/lapis/lapisd.sock elsewhere)
     --dump-frame <path>   Render one 320x170 frame to an RGB PNG and exit
     --view <name>         companion|ticker|menu|approval|prompt|setup (default companion)
     --help                Show this help
@@ -31,6 +33,7 @@ struct Args {
     demo: bool,
     dump: Option<String>,
     view: Option<String>,
+    socket: Option<String>,
 }
 
 fn usage_err(msg: &str) -> ExitCode {
@@ -46,15 +49,14 @@ fn main() -> ExitCode {
             "--sim" => args.sim = true,
             "--demo" => args.demo = true,
             "--fb" => return usage_err("fbdev lands in Phase 4"),
-            "--socket" => return usage_err("ipc socket lands in Phase 2"),
-            "--dump-frame" | "--view" => {
+            "--dump-frame" | "--view" | "--socket" => {
                 let Some(v) = it.next() else {
                     return usage_err(&format!("{a} needs a value"));
                 };
-                if a == "--view" {
-                    args.view = Some(v);
-                } else {
-                    args.dump = Some(v);
+                match a.as_str() {
+                    "--view" => args.view = Some(v),
+                    "--socket" => args.socket = Some(v),
+                    _ => args.dump = Some(v),
                 }
             }
             "--help" | "-h" => {
@@ -85,6 +87,11 @@ fn main() -> ExitCode {
         if view == View::Approval {
             app.show_synthetic_approval();
         }
+        // Only an explicit --socket makes the dump depend on a live daemon.
+        if let Some(sock) = args.socket.as_deref() {
+            sync_once(&mut app, sock);
+            app.set_view(view);
+        }
         // Settled, deterministic snapshot: pinned desk clock, no slide/motion,
         // and any modal snap-rested so borders/preview land predictably.
         app.settle_all();
@@ -104,11 +111,35 @@ fn main() -> ExitCode {
     }
 
     if args.sim {
-        return run_sim(view, args.demo);
+        return run_sim(
+            view,
+            args.demo,
+            &selected_socket_path(args.socket.as_deref()),
+        );
     }
 
     print!("{HELP}");
     ExitCode::from(2)
+}
+
+/// Best-effort single sync for `--dump-frame --socket`: connect, then give the
+/// daemon up to 250 ms to answer `request_sync`. No daemon, no change.
+fn sync_once(app: &mut App, socket: &str) {
+    let mut ipc = IpcClient::new(socket);
+    if let Err(e) = ipc.connect_ready(0.0) {
+        eprintln!("lapis-ui: {e}");
+    }
+    let mut got = false;
+    for _ in 0..25 {
+        if got || !ipc.is_connected() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        ipc.poll(0.0, |v| {
+            got = true;
+            app.on_daemon_message(v);
+        });
+    }
 }
 
 /// Writes `canvas` as an 8-bit RGB PNG.
@@ -127,7 +158,7 @@ fn write_png(path: &str, canvas: &Canvas) -> Result<(), Box<dyn std::error::Erro
 }
 
 #[cfg(feature = "sim")]
-fn run_sim(view: View, demo: bool) -> ExitCode {
+fn run_sim(view: View, demo: bool, socket: &str) -> ExitCode {
     use lapis_ui::backend::sdl_sim::SimBackend;
     use std::time::Instant;
 
@@ -140,6 +171,8 @@ fn run_sim(view: View, demo: bool) -> ExitCode {
     };
     let mut app = App::new();
     app.set_view(view);
+    // Always created; inert (demo state stays) until a daemon is listening.
+    let mut ipc = IpcClient::new(socket);
     let start = Instant::now();
     let mut prev_now = 0.0f32;
     let mut canvas = Canvas::new();
@@ -151,9 +184,17 @@ fn run_sim(view: View, demo: bool) -> ExitCode {
         let now = start.elapsed().as_secs_f32();
         let dt = (now - prev_now).clamp(0.0, 0.1);
         prev_now = now;
+        // ponytail: the socket is polled once per frame, so an idle UI (1 FPS)
+        // reacts to the daemon within 1s; poll(2) on the fd if that is too slow.
+        if let Err(e) = ipc.connect_ready(now) {
+            eprintln!("lapis-ui: {e}");
+        }
+        ipc.poll(now, |v| app.on_daemon_message(v));
         // Drain at most one key per frame; the rest queue in SDL.
-        if let Some(k) = sim.poll() {
-            app.key(k);
+        if let Some(msg) = sim.poll().and_then(|k| app.key(k)) {
+            if let Err(e) = ipc.send(&msg) {
+                eprintln!("lapis-ui: {e}");
+            }
         }
         if demo {
             app.demo_tick(now);
@@ -168,6 +209,6 @@ fn run_sim(view: View, demo: bool) -> ExitCode {
 }
 
 #[cfg(not(feature = "sim"))]
-fn run_sim(_view: View, _demo: bool) -> ExitCode {
+fn run_sim(_view: View, _demo: bool, _socket: &str) -> ExitCode {
     usage_err("built without the `sim` feature; rebuild with default features")
 }

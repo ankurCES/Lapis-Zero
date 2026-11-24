@@ -7,10 +7,10 @@ use crate::gfx::font::{draw_text, Font};
 use super::{CONTENT_Y, RULE_Y};
 
 pub struct PromptView {
-    pub host: &'static str,
-    /// Accumulated text (synthetic; no input processor bound yet).
+    pub host: String,
+    /// Accumulated ASCII prompt buffer.
     pub buffer: Vec<u8>,
-    /// Set true by ENTER for one frame (Phase 2 forwards it).
+    /// Set true by ENTER while waiting for daemon `state_sync`.
     pub dispatch: bool,
     /// Blink phase for the cursor.
     pub cursor: bool,
@@ -19,7 +19,7 @@ pub struct PromptView {
 impl PromptView {
     pub fn new() -> Self {
         Self {
-            host: "macbook-pro",
+            host: "macbook-pro".to_string(),
             buffer: Vec::new(),
             dispatch: false,
             cursor: true,
@@ -27,7 +27,11 @@ impl PromptView {
     }
 
     pub fn push(&mut self, c: char) {
-        if self.buffer.len() < 60 {
+        if c == '\x08' || c == '\x7f' {
+            self.buffer.pop();
+            return;
+        }
+        if c.is_ascii() && !c.is_ascii_control() && self.buffer.len() < 60 {
             self.buffer.push(c as u8);
         }
     }
@@ -55,7 +59,7 @@ pub fn render(canvas: &mut Canvas, p: &PromptView, now: f32) {
 
     // Active host.
     let mut hb = [0u8; 32];
-    let h = super::fmt_into(&mut hb, &["host: ", p.host]);
+    let h = super::fmt_into(&mut hb, &["host: ", &p.host]);
     draw_text(canvas, tx, ty + 20, h, Font::F6x8, ACCENT_BLUE);
 
     // Text area (2 lines, wrapped trivially).

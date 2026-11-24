@@ -3,8 +3,32 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
+import signal
+import sys
+from collections.abc import Callable
+from pathlib import Path
 
 from lapis_daemon import __version__
+from lapis_daemon.agent.runner import TaskRunner
+from lapis_daemon.config import (
+    DEFAULT_CONFIG,
+    CoreConfig,
+    EffectivePaths,
+    HostsConfig,
+    effective_paths,
+    load_config,
+    load_hosts,
+    mock_config,
+    mock_hosts,
+)
+from lapis_daemon.db import LapisDb
+from lapis_daemon.ipc_server import IpcServer
+from lapis_daemon.kvm.base import MockHostDriver
+from lapis_daemon.system_status import mock_state
+
+# Pause between mock steps so the UI ticker is watchable.
+MOCK_STEP_DELAY_SEC = 0.8
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -20,20 +44,70 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--config",
-        default="/etc/lapis/lapis.toml",
-        help="Path to the daemon configuration file (default: %(default)s).",
+        default=None,
+        help="Path to the daemon configuration file "
+        f"(default: $LAPIS_CONFIG_DIR/lapis.toml, else {DEFAULT_CONFIG}).",
     )
     return parser
 
 
+def _load_or_mock[T](
+    path: Path, loader: Callable[[Path], T], fallback: Callable[[], T], mock: bool
+) -> T:
+    """Prefer the real file; in mock mode fall back to built-in defaults."""
+    try:
+        return loader(path)
+    except (OSError, ValueError) as exc:  # TOML and pydantic errors are ValueErrors
+        if not mock:
+            raise
+        if path.exists():
+            print(f"lapis-daemon: ignoring invalid {path}: {exc}", file=sys.stderr)
+        return fallback()
+
+
+async def serve_until_signal(paths: EffectivePaths, config: CoreConfig, hosts: HostsConfig) -> None:
+    """Serve IPC until SIGINT/SIGTERM, then stop cleanly."""
+    paths.db_path.parent.mkdir(parents=True, exist_ok=True)
+    db = LapisDb(paths.db_path)
+    await db.init()
+    # Phase 2 only has the mock driver; real VNC/SSH drivers land in Phase 3.
+    runner = TaskRunner(
+        db,
+        hosts,
+        driver_factory=MockHostDriver,
+        max_steps=config.llm.max_steps,
+        step_delay=MOCK_STEP_DELAY_SEC,
+    )
+    server = IpcServer(paths.socket_path, db, hosts, runner, mock_state)
+    await server.start()
+    print(f"lapis-daemon {__version__} listening on {paths.socket_path} (mock KVM)", flush=True)
+
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, stop.set)
+    try:
+        await stop.wait()
+    finally:
+        if runner.is_running:
+            await runner.kill_all()
+        await server.stop()
+        db.close()
+
+
 def main(argv: list[str] | None = None) -> int:
     """Run the lapis-daemon CLI entrypoint."""
-    parser = build_parser()
-    args = parser.parse_args(argv)
-
-    if args.mock:
-        print(f"lapis-daemon {__version__} (mock mode) — daemon core lands in Phase 2")
-        return 0
-
-    print("config loading lands in Phase 2")
+    args = build_parser().parse_args(argv)
+    paths = effective_paths(args.config)
+    try:
+        config = _load_or_mock(paths.config, load_config, mock_config, args.mock)
+        hosts = _load_or_mock(paths.hosts, load_hosts, mock_hosts, args.mock)
+    except (OSError, ValueError) as exc:
+        print(f"lapis-daemon: cannot load configuration: {exc}", file=sys.stderr)
+        return 2
+    try:
+        asyncio.run(serve_until_signal(paths, config, hosts))
+    except OSError as exc:
+        print(f"lapis-daemon: {exc} (set LAPIS_CONFIG_DIR for a rootless run)", file=sys.stderr)
+        return 1
     return 0

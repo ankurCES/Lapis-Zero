@@ -20,6 +20,8 @@ pub enum LapisKey {
     Enter,
     /// Back / cancel / deny.
     Esc,
+    /// Hold ESC for >=1.5s: global agent kill-switch (`agent_control: kill_all`).
+    EscHold,
     /// Quick-cycle the active Tailscale target host.
     Tab,
     /// Cycle to the previous view (`Z` or `Left`).

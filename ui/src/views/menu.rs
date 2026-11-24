@@ -18,7 +18,7 @@ const ROWS: [&str; 6] = [
 ];
 
 pub struct MenuView {
-    hosts: [&'static str; 2],
+    hosts: Vec<String>,
     host_idx: usize,
     /// Highlighted row (spring pill follows this).
     pub index: usize,
@@ -28,13 +28,28 @@ pub struct MenuView {
 impl MenuView {
     pub fn demo() -> Self {
         let mut s = Self {
-            hosts: ["macbook-pro", "arch-dev"],
+            hosts: vec!["macbook-pro".to_string(), "arch-dev".to_string()],
             host_idx: 0,
             index: 0,
             pill: Spring::new(320.0, 26.0, 0.0),
         };
         s.pill.snap_to(0.0);
         s
+    }
+
+    /// Replaces the host list from a daemon `state_sync` and selects `active`.
+    pub fn set_hosts(&mut self, hosts: Vec<String>, active: &str) {
+        if !hosts.is_empty() {
+            self.hosts = hosts;
+        }
+        if let Some(pos) = self.hosts.iter().position(|h| h == active) {
+            self.host_idx = pos;
+        } else if !active.is_empty() {
+            self.hosts.push(active.to_string());
+            self.host_idx = self.hosts.len() - 1;
+        } else if self.host_idx >= self.hosts.len() {
+            self.host_idx = 0;
+        }
     }
 
     /// Moves the highlight by `delta` rows (wrapping).
@@ -46,12 +61,17 @@ impl MenuView {
 
     /// Cycles the active Tailscale target (SPEC 5.4 `TAB`).
     pub fn cycle_host(&mut self) {
-        self.host_idx = (self.host_idx + 1) % self.hosts.len();
+        if !self.hosts.is_empty() {
+            self.host_idx = (self.host_idx + 1) % self.hosts.len();
+        }
     }
 
     /// The currently active host.
-    pub fn host(&self) -> &'static str {
-        self.hosts[self.host_idx]
+    pub fn host(&self) -> &str {
+        self.hosts
+            .get(self.host_idx)
+            .map(String::as_str)
+            .unwrap_or("macbook-pro")
     }
 }
 

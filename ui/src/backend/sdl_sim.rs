@@ -1,7 +1,7 @@
 //! Desktop SDL2 simulator: 320x170 canvas shown 3x (960x510) with nearest scaling.
 
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use sdl2::event::Event;
 use sdl2::keyboard::Keycode;
@@ -15,6 +15,8 @@ use crate::gfx::canvas::{Canvas, HEIGHT, WIDTH};
 
 /// Integer upscale factor for the simulator window.
 const SCALE: u32 = 3;
+/// Hold threshold for ESC global kill-switch (SPEC 5.4).
+const ESC_HOLD_DURATION: Duration = Duration::from_millis(1500);
 
 /// SDL2 window + streaming texture implementing both backend traits.
 pub struct SimBackend {
@@ -23,6 +25,7 @@ pub struct SimBackend {
     events: EventPump,
     argb: Vec<u8>,
     quit: bool,
+    esc_down: Option<Instant>,
 }
 
 impl SimBackend {
@@ -58,6 +61,7 @@ impl SimBackend {
             events: sdl.event_pump()?,
             argb: vec![0; (WIDTH * HEIGHT * 4) as usize],
             quit: false,
+            esc_down: None,
         })
     }
 
@@ -109,6 +113,26 @@ impl InputBackend for SimBackend {
         for event in self.events.poll_iter() {
             match event {
                 Event::Quit { .. } => self.quit = true,
+                Event::KeyDown {
+                    keycode: Some(Keycode::ESCAPE),
+                    repeat,
+                    ..
+                } => {
+                    if !repeat && self.esc_down.is_none() {
+                        self.esc_down = Some(Instant::now());
+                    }
+                }
+                Event::KeyUp {
+                    keycode: Some(Keycode::ESCAPE),
+                    ..
+                } => {
+                    if let Some(down_at) = self.esc_down.take() {
+                        if down_at.elapsed() >= ESC_HOLD_DURATION {
+                            return Some(LapisKey::EscHold);
+                        }
+                        return Some(LapisKey::Esc);
+                    }
+                }
                 Event::KeyDown {
                     keycode: Some(k), ..
                 } => {
