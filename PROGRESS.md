@@ -124,16 +124,32 @@ factory verifies a lazily-built `CompositeHostDriver`. STOP for Phase 4.
 
 **Deliverables**
 
-- [ ] `ui/src/backend/fbdev.rs` (`/dev/fb0` mmap RGB565 + stride-safe flush)
-- [ ] `ui/src/backend/hw_cm0.rs` (TCA8418 evdev, BQ27220 battery, backlight `fn+U/I` + idle blanking, BMI270 motion wake)
-- [ ] `aarch64-unknown-linux-gnu` cross-compile (`zigbuild`/`cross`) targets in `Makefile`
+- [x] `ui/src/backend/fbdev.rs` (`/dev/fb0` mmap RGB565 + stride-safe flush)
+- [x] `ui/src/backend/hw_cm0.rs` (TCA8418 evdev, BQ27220 battery, backlight `fn+U/I` + idle blanking, BMI270 motion wake)
+- [x] `aarch64-unknown-linux-gnu` cross-compile (`zigbuild`/`cross`) targets in `Makefile`
 
 **Acceptance criteria**
 
-- [ ] `make cross-ui` builds a stripped aarch64 release binary cleanly
-- [ ] Linux hardware backend unit tests and mock-sysfs tests pass
+- [x] `make cross-ui` builds a stripped aarch64 release binary cleanly — `ui/target/aarch64-unknown-linux-gnu/release/lapis-ui`, ELF aarch64, stripped, 762,880 bytes
+- [x] Linux hardware backend unit tests and mock-sysfs tests pass — fbdev RGB565/stride + hw_cm0 evdev/battery/backlight/IMU pure-function tests in `cargo test` (host); Linux-only sysfs/evdev/mmap paths are `#[cfg(target_os = "linux")]`
 
-**Report:** _pending_
+**Report:** 2026-11-24 — Phase 4 complete. Changed: `ui/src/backend/fbdev.rs` (portable
+RGB888→RGB565 + stride-aware row blit; Linux `/dev/fb0` mmap via `FBIOGET_VSCREENINFO`
+0x4600 / `FBIOGET_FSCREENINFO` 0x4602, `#[repr(C)]` ABI structs copied from
+`include/uapi/linux/fb.h`, 16 bpp guard, `munmap` on drop), `ui/src/backend/hw_cm0.rs`
+(evdev `input_event` decode, TCA8418 keycode→`LapisKey` map with `fn` modifier,
+ESC-hold 1.5 s state machine, BQ27220 parsers, backlight clamp + 30 s/90 s idle
+policy, BMI270 motion delta; `linux_io` submodule with `Backlight`/`FuelGauge`/
+`Imu`/`EvdevInput` behind `#[cfg(target_os = "linux")]`), `backend/mod.rs` (module
+registration + `LapisKey::{BacklightDown,BacklightUp}`), `main.rs` (`--fb` run loop:
+fbdev display + evdev input + sysfs backlight step on `fn+U/I` + IPC; non-Linux
+`--fb` errors cleanly), `ui/Cargo.toml` + `Cargo.lock` (`libc` pinned to
+`cfg(target_os = "linux")`), `Makefile` (`cross-ui` via `cargo-zigbuild` +
+`llvm-strip`). Commands (all pass): `cargo test` 47 passed (default + no-default),
+`cargo clippy --all-targets` clean (all-features + no-default), `cargo fmt --check`
+clean, `make cross-ui` clean (stripped aarch64 binary, 762,880 B), `uv run pytest`
+53 passed + `ruff check`/`ruff format --check` clean (unchanged Phase 3 code),
+6× `--dump-frame` wrote 320×170 PNGs. STOP for Phase 5.
 
 ---
 

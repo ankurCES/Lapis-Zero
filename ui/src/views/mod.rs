@@ -379,6 +379,9 @@ impl App {
                     self.prompt.push(c);
                 }
             }
+            // Local hardware-only controls: the `--fb` loop steps the ST7789
+            // backlight itself (sysfs); nothing travels over IPC.
+            K::BacklightDown | K::BacklightUp => return None,
             K::Left | K::Right => {}
         }
         None

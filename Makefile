@@ -45,9 +45,28 @@ dump-frames:
 	done
 	@echo "wrote $(DUMPS)/{companion,ticker,menu,approval,prompt,setup}.png"
 
-# --- Later phases (stubs until their phase starts) ---------------------------
+# Cross-compile the CM0 binary: no SDL (`sim` off) so it links fbdev/evdev only.
+# Zig provides the aarch64-unknown-linux-gnu toolchain + libc, so no Docker/cross
+# image is needed. Output is stripped to keep the flash footprint small.
+TARGET_TRIPLE ?= aarch64-unknown-linux-gnu
+ZIGBUILD     ?= cargo-zigbuild
+OUT_BIN      ?= ui/target/$(TARGET_TRIPLE)/release/lapis-ui
+# Strip with Rust's own llvm-strip (installed via `rustup component add llvm-tools-preview`);
+# it reads/writes aarch64 ELF on any host, so no GNU binutils is needed.
+LLVM_STRIP   ?= $(shell ls $(shell rustc --print sysroot)/lib/rustlib/*/bin/llvm-strip 2>/dev/null | head -1)
+
 cross-ui:
-	@echo "cross-ui: lands in Phase 4 (aarch64-unknown-linux-gnu via zigbuild/cross)"
+	rustup target add $(TARGET_TRIPLE) >/dev/null
+	$(ZIGBUILD) build --manifest-path ui/Cargo.toml \
+		--release --no-default-features \
+		--target $(TARGET_TRIPLE)
+	@if [ -n "$(LLVM_STRIP)" ] && [ -f "$(LLVM_STRIP)" ]; then \
+		"$(LLVM_STRIP)" --strip-all "$(OUT_BIN)"; \
+		echo "stripped $(OUT_BIN)"; \
+	else \
+		echo "llvm-strip not found; leaving $(OUT_BIN) unstripped"; \
+	fi
+	@test -f $(OUT_BIN) && ls -l $(OUT_BIN)
 
 build-os:
 	@echo "build-os: lands in Phase 5 (pi-gen + CardputerZero BSP in Docker)"

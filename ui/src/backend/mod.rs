@@ -2,6 +2,8 @@
 
 use crate::gfx::canvas::Canvas;
 
+pub mod fbdev;
+pub mod hw_cm0;
 #[cfg(feature = "sim")]
 pub mod sdl_sim;
 
@@ -30,6 +32,10 @@ pub enum LapisKey {
     CycleR,
     /// A printable character.
     Char(char),
+    /// `fn + U`: decrease LCD backlight brightness (SPEC 5.4).
+    BacklightDown,
+    /// `fn + I`: increase LCD backlight brightness (SPEC 5.4).
+    BacklightUp,
 }
 
 /// Something that can show a finished frame.
