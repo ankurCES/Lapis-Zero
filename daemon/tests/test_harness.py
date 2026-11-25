@@ -112,7 +112,8 @@ def test_hostile_messages_arrive_byte_for_byte_through_real_login_shells(tmp_pat
 
 def test_each_tool_gets_its_own_flags_for_tier_and_session() -> None:
     def tail(tool_id: str, **kw: str) -> str:
-        return command(BUILTIN[tool_id], "do it", **kw).split("; then ")[1].split("; else")[0]
+        run = command(BUILTIN[tool_id], "do it", **kw).split("; then ", 1)[1].rsplit("; else", 1)[0]
+        return run.rsplit("; fi; ", 1)[-1]  # past Claude Code's token file (see below)
 
     assert tail("claude", tier="strict") == (
         'printf %s "$p" | "$t" -p --output-format json --permission-mode plan'
@@ -127,9 +128,9 @@ def test_each_tool_gets_its_own_flags_for_tier_and_session() -> None:
     assert tail("freya", tier="balanced", session="ignored") == '"$t" agent "$p"'
     assert tail("freya", tier="autonomous") == '"$t" agent --yolo "$p"'
     assert tail("codex", tier="autonomous") == '"$t" exec "$p"'
-    assert tail("gemini", tier="strict") == '"$t" --approval-mode plan -p "$p"'
-    assert tail("gemini", tier="balanced") == '"$t" --approval-mode auto_edit -p "$p"'
-    assert tail("gemini", tier="autonomous") == '"$t" --approval-mode yolo -p "$p"'
+    assert tail("gemini", tier="strict") == '"$t" -o json --approval-mode plan -p "$p"'
+    assert tail("gemini", tier="balanced") == '"$t" -o json --approval-mode auto_edit -p "$p"'
+    assert tail("gemini", tier="autonomous") == '"$t" -o json --approval-mode yolo -p "$p"'
     assert tail("cursor", tier="strict") == (
         '"$t" -p --output-format text --trust --mode plan "$p"'
     )
@@ -199,6 +200,46 @@ def test_reading_what_claude_code_printed() -> None:
     assert harness.read_claude("[" * 100_000).text.startswith("[[[")
     gone = harness.read_claude("No conversation found with session ID: 0a1b\n")
     assert gone.lost_session and not harness.read_claude(line).lost_session
+
+
+def test_reading_what_gemini_cli_printed() -> None:
+    # As Gemini CLI 0.71 printed it under the device's TERM=dumb, through a terminal.
+    warned = (
+        "Warning: Basic terminal detected (TERM=dumb). Visual rendering will be limited.\r\n"
+        "Warning: 256-color support not detected.\r\n"
+        "Ripgrep is not available. Falling back to GrepTool.\r\n"
+    )
+    shown = json.dumps(
+        {"session_id": "fe9d-c640", "response": " ok ", "stats": {"models": {}}}, indent=2
+    )
+    assert harness.read_gemini(warned + shown.replace("\n", "\r\n")) == Answer("ok", "fe9d-c640")
+    failed = json.dumps(
+        {"error": {"type": "Error", "message": "Please set an Auth method", "code": 41}}
+    )
+    assert harness.read_gemini(warned + failed) == Answer("Please set an Auth method", "", True)
+    # No answer object (an older version without -o json, or cut): what it printed.
+    assert harness.read_gemini("Unknown argument: o\n") == Answer("Unknown argument: o", raw=True)
+    assert harness.read_gemini(warned + '{\n  "response": "cut by the 64').raw
+    assert BUILTIN["gemini"].show(warned.splitlines()[0]) == ""  # no warning as a ticker line
+
+
+def test_claude_code_gets_the_token_file_and_says_how_to_make_one() -> None:
+    script = command(BUILTIN["claude"], "hi", tier="strict")
+    assert (
+        'if [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] && [ -r "$HOME/".claude/lapis-token ]' in script
+    )
+    other = command(BUILTIN["gemini"], "hi", tier="strict")
+    assert "lapis-token" not in other and "OAUTH" not in other
+    run = SimpleNamespace(
+        started=True, timed_out=False, cut=False, left="", exit_status=1,
+        output="Not logged in \xb7 Please run /login\r\n",
+    )  # fmt: skip
+    said = answer(BUILTIN["claude"], run, "mac", 60)
+    assert said.is_error and said.text.startswith(
+        "Claude Code failed (exit status 1). Its last output:\nNot logged in · Please run /login"
+    )
+    assert "run `claude setup-token`" in said.text and "~/.claude/lapis-token" in said.text
+    assert "setup-token" not in answer(BUILTIN["gemini"], run, "mac", 60).text
 
 
 def test_reading_what_opencode_printed() -> None:

@@ -6,6 +6,6 @@ cat > "$out/stdin"
 : > "$out/args"
 for a in "$@"; do printf '%s\0' "$a" >> "$out/args"; done
 pwd > "$out/cwd"
-echo "$TERM $NO_COLOR" > "$out/env"
+echo "$TERM $NO_COLOR ${CLAUDE_CODE_OAUTH_TOKEN:-}" > "$out/env"
 n=$(cat "$out/n" 2>/dev/null || echo 0); n=$((n + 1)); echo $n > "$out/n"
 printf '{"type":"result","is_error":false,"result":"answer %s","session_id":"sess-%s"}\n' $n $n

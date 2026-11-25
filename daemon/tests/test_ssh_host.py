@@ -283,12 +283,15 @@ def test_agent_tools_are_found_and_run_through_the_login_shell(tmp_path: Path) -
             assert (host.home / "stdin").read_bytes() == nasty.encode()
             assert args(host) == "-p --output-format json --permission-mode plan"
             assert (host.home / "cwd").read_text().strip().endswith("/home/work dir")
-            assert (host.home / "env").read_text() == "dumb 1\n"
+            assert (host.home / "env").read_text() == "dumb 1 \n"  # no token file: none
             assert host.terminals[-1] == "dumb"  # a terminal, so a hang-up reaches the tool
             assert not list(tmp_path.rglob("PWNED")) and not (host.home / "out").exists()
             assert seen == []  # Claude Code prints its answer only: no ticker lines
 
-            # The follow-up continues the session the tool named.
+            # The follow-up continues the session the tool named, and a token file the
+            # account made for Claude Code (the Keychain is out of reach) is handed over.
+            (host.home / ".claude").mkdir()
+            (host.home / ".claude" / "lapis-token").write_text("tok-1\n")
             second = await driver.run_agent(
                 BUILTIN["claude"], "and now?", session=first.session, tier="autonomous"
             )
@@ -297,6 +300,7 @@ def test_agent_tools_are_found_and_run_through_the_login_shell(tmp_path: Path) -
             with pytest.raises(ValueError, match="cannot be held to the balanced policy"):
                 await driver.run_agent(BUILTIN["opencode"], "hello", tier="balanced")
             assert len(host.commands) == ran
+            assert (host.home / "env").read_text() == "dumb 1 tok-1\n"
             assert second.session == "sess-2" and args(host) == (
                 "-p --output-format json --permission-mode bypassPermissions --resume sess-1"
             )
@@ -304,7 +308,7 @@ def test_agent_tools_are_found_and_run_through_the_login_shell(tmp_path: Path) -
             # that is not there.
             said = await driver.run_agent(BUILTIN["gemini"], "--yolo", tier="balanced")
             assert (said.text, said.session, said.is_error) == (
-                "said: --approval-mode auto_edit -p  --yolo", "", False,
+                "said: -o json --approval-mode auto_edit -p  --yolo", "", False,
             )  # fmt: skip
             absent = await driver.run_agent(BUILTIN["opencode"], "hello", tier="autonomous")
             assert absent.is_error and absent.text.startswith("opencode is not installed on fake")

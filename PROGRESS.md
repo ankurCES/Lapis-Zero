@@ -924,3 +924,32 @@ Flashed with `dd` to the 1 TB card in the built-in reader. macOS mounted `bootfs
 write and added `.Spotlight-V100` and `.fseventsd`, so the whole-card hash differs; checked by
 part instead: every boot file identical to the image's, root partition (`64bdd308...`) and
 partition table (`cdee224a...`) identical. Not yet booted.
+
+## 0.3.3: Claude Code and Gemini CLI on a Mac host (2026-11-25)
+
+Seen on the phone after 0.3.2: a Claude Code chat ended "Not logged in · Please run /login" on a
+Mac where `claude` is logged in, and every Gemini CLI answer began with its TERM=dumb and
+Ripgrep warnings (also as the step line).
+
+- Claude Code on macOS keeps its login only in the login Keychain (`Claude Code-credentials`),
+  which a session over SSH cannot open. Each run now reads `~/.claude/lapis-token` on the host
+  (made with `claude setup-token`, mode 600) into `CLAUDE_CODE_OAUTH_TOKEN` when that is not
+  already set; the token never leaves the host. A reply that still asks for /login says how.
+- Gemini CLI runs with `-o json`; its indented answer object is read past the warnings
+  (`read_gemini`), and it has no ticker line. Reproduced on this Mac with Gemini CLI 0.71.1.
+- `agent/harness.py`; checked: 285 passed, 1 xfailed (real Gemini output in a unit test, the token
+  file through the fake SSH host), ruff clean, mypy unchanged (46, none new). The token file on
+  cut-mac-002 is in place and Claude Code answers with it alone.
+- Seen once, not addressed: Gemini's own `response` began with leaked model reasoning
+  ("...thought / CRITICAL INSTRUCTION 1"); the run before was clean.
+
+### Image 0.3.3 (built 2026-11-25, not yet flashed)
+
+| File | Bytes | SHA-256 |
+|---|---|---|
+| `os/deploy/lapis-zero-arm64.img.xz` | 641,771,016 | `547393d629daaa64cd384afdb328150097c3ba6be40450f3737fa59d57f75e25` |
+| `os/deploy/lapis-zero-arm64.img` | 5,368,709,120 | `81b3634c2573e8f7eae22c1ae5c1025ef727c4e81efb2b0840b52be382732456` |
+| `os/deploy/os-list.json` | 1562 | `b7b89d4d874fce11397dc1833480c92ccc0699b72e120496488afe41e35244ef` |
+
+0.3.2 moved to `os/deploy/previous/`. In the image: daemon wheel 0.3.3 with both changes,
+`lapis-ui` unchanged from 0.3.2 (`fac4d78e...`).

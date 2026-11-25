@@ -125,6 +125,25 @@ def read_opencode(output: str) -> Answer:
     return Answer("\n".join(errors) if errors else said, session, bool(errors))
 
 
+def read_gemini(output: str) -> Answer:
+    """`gemini -o json`: one indented object with `response` and `session_id`, or `error`
+    (`{type, message, code}`), after the warnings it prints on the way ("Basic terminal
+    detected", "Ripgrep is not available"), which are not part of the answer."""
+    decoder = json.JSONDecoder()
+    for start in reversed([m.start() for m in re.finditer(r"^\{", output, re.M)]):
+        try:
+            data, _ = decoder.raw_decode(output, start)
+        except (ValueError, RecursionError):  # cut by the 64 KB limit, or not JSON at all
+            continue
+        if isinstance(data, dict) and ("response" in data or "error" in data):
+            session, error = _session(data.get("session_id")), data.get("error")
+            if error:
+                said = error.get("message") if isinstance(error, dict) else error
+                return Answer(str(said or "error"), session, is_error=True)
+            return Answer(str(data.get("response") or "").strip(), session)
+    return Answer(clean(output), raw=True)
+
+
 def show_line(line: str) -> str:
     return clean(line)[:PROGRESS_MAX]
 
@@ -167,6 +186,10 @@ class Harness:
     show: Callable[[str], str] = show_line  # one line of output -> a progress line ("" = none)
     # Where the program also lives when it is not on the PATH, relative to the home folder.
     places: tuple[str, ...] = ()
+    # A login the tool also takes from an environment variable: (variable, file under the
+    # home folder that holds it, the command that makes one). The file is read when the
+    # account has it and the variable is not already set; it never leaves the host.
+    login: tuple[str, ...] = ()
 
 
 _CLAUDE_TIERS = {
@@ -211,6 +234,9 @@ BUILTIN: dict[str, Harness] = {
             read=read_claude,
             show=show_nothing,
             places=(".local/bin/claude", ".claude/local/claude"),
+            # On a Mac its own login is in the Keychain, which a session over SSH cannot
+            # open: "Not logged in · Please run /login". A long-lived token works there.
+            login=("CLAUDE_CODE_OAUTH_TOKEN", ".claude/lapis-token", "claude setup-token"),
         ),
         Harness(
             "opencode",
@@ -237,7 +263,16 @@ BUILTIN: dict[str, Harness] = {
         Harness(
             "codex", "Codex", "codex", run=("exec",), prompt=(PROMPT,), tiers={"autonomous": ()}
         ),
-        Harness("gemini", "Gemini CLI", "gemini", prompt=("-p", PROMPT), tiers=_GEMINI_TIERS),
+        Harness(
+            "gemini",
+            "Gemini CLI",
+            "gemini",
+            run=("-o", "json"),
+            prompt=("-p", PROMPT),
+            tiers=_GEMINI_TIERS,
+            read=read_gemini,
+            show=show_nothing,
+        ),
         Harness(
             "cursor",
             "Cursor Agent",
@@ -370,8 +405,14 @@ def command(tool: Harness, message: str, *, tier: str, session: str = "", workdi
     else:
         run = " ".join(["printf %s", '"$p"', "|", '"$t"', *words])
     go = ""
+    if tool.login:
+        var, path = tool.login[0], _word(tool.login[1])
+        go = (  # no `!`: csh, which the line may cross, would read it as history
+            f'if [ -z "${{{var}:-}}" ] && [ -r "$HOME/"{path} ]; then '
+            f'{var}=$(cat "$HOME/"{path}); export {var}; fi; '
+        )
     if workdir:
-        go = (
+        go += (
             f"d={_word(workdir)}; "
             "case $d in '~') d=$HOME;; '~/'*) d=$HOME/${d#'~/'};; esac; "
             '{ cd -- "$d" 2>/dev/null || '
@@ -454,4 +495,12 @@ def answer(tool: Harness, run: Any, host: str, timeout_s: float) -> Answer:
     else:
         text = read.text[-ANSWER_MAX:] or f"{tool.name} finished without printing an answer."
         return Answer(text, read.session)
+    if tool.login and "/login" in run.output:
+        text += (
+            f"\n\nIf {tool.name} is logged in on {host}, that login may be one a session over "
+            f"SSH cannot open (on a Mac it is kept in the Keychain). Once, in a terminal on "
+            f"{host}: run `{tool.login[2]}`, then save the token it prints, alone, in "
+            f"~/{tool.login[1]}, readable only by you (`chmod 600 ~/{tool.login[1]}`). "
+            f"Every run from this device then hands it to {tool.name}."
+        )
     return Answer(text, read.session, True, read.lost_session)

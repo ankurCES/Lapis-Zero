@@ -18,7 +18,7 @@ from lapis_daemon.main import main
 
 
 def test_version_exported() -> None:
-    assert lapis_daemon.__version__ == "0.3.2"
+    assert lapis_daemon.__version__ == "0.3.3"
 
 
 def test_help_lists_flags(capsys: pytest.CaptureFixture[str]) -> None:
@@ -72,7 +72,7 @@ def test_real_mode_starts_without_any_config_and_keeps_the_api_on_loopback(
         assert proc.stdout is not None
         sock = short_tmp / "lapisd.sock"
         assert proc.stdout.readline().strip() == (
-            f"lapis-daemon 0.3.2 listening on {sock} (real Option C KVM)"
+            f"lapis-daemon 0.3.3 listening on {sock} (real Option C KVM)"
         )
         assert proc.stdout.readline().strip() == (
             f"lapis-daemon control plane on http://127.0.0.1:{port}"
@@ -100,7 +100,7 @@ def test_mock_daemon_honors_config_dir_and_stops_on_sigterm(short_tmp: Path) -> 
         assert proc.stdout is not None
         line = proc.stdout.readline()
         sock = short_tmp / "lapisd.sock"
-        assert line.strip() == f"lapis-daemon 0.3.2 listening on {sock} (mock KVM)"
+        assert line.strip() == f"lapis-daemon 0.3.3 listening on {sock} (mock KVM)"
         assert sock.is_socket()
         assert (short_tmp / "lapis.db").exists()
         proc.send_signal(signal.SIGTERM)
