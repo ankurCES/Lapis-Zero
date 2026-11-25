@@ -1,6 +1,7 @@
 package dev.lapiszero.app.ui.chats
 
 import androidx.compose.foundation.layout.Arrangement
+import dev.lapiszero.app.ui.components.AgentLogo
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -125,78 +126,75 @@ fun ChatListScreen(session: LapisSession, snackbar: SnackbarHostState, onOpenCha
                     )
                 }
             }
-            if (ui.rows.isEmpty()) {
-                Column(
-                    Modifier.fillMaxSize().padding(32.dp),
-                    verticalArrangement = Arrangement.Center,
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                ) {
-                    Text("No chats yet", style = MaterialTheme.typography.titleMedium)
-                    Spacer(Modifier.height(4.dp))
-                    Text(
-                        "Start one and the agent runs your prompt on the selected host.",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = lapis.muted,
-                    )
-                }
-            } else {
-                LazyColumn(
-                    Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 96.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    items(ui.rows, key = { it.chat.id }) { row ->
-                        ChatRowCard(
-                            row = row,
-                            onOpen = { onOpenChat(row.chat.id) },
-                            onRename = { renaming = row },
-                            onArchive = { vm.archive(row.chat.id) },
-                            onDelete = { deleting = row },
+            LazyColumn(
+                Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 96.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                // Each host with the agents that can work on it: one tap opens a session in a tab.
+                val shownHosts = ui.hostFilter?.let(::listOf) ?: ui.hosts
+                if (shownHosts.isNotEmpty()) {
+                    // Label items keep positional keys: hosts arriving after the list was drawn
+                    // then appear in view instead of above it.
+                    item { SectionLabel("Start a session") }
+                    items(shownHosts, key = { "host-$it" }) { host ->
+                        HostTools(
+                            host = host,
+                            active = host == ui.activeHost,
+                            tools = ui.agents[host],
+                            onPick = { agent -> vm.createChat(host, agent) },
+                            compact = true,
                         )
                     }
+                }
+                item { SectionLabel("Recent", Modifier.padding(top = 8.dp)) }
+                if (ui.rows.isEmpty()) {
+                    item(key = "none") {
+                        Column(Modifier.fillMaxWidth().padding(vertical = 24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text("No chats yet", style = MaterialTheme.typography.titleMedium)
+                            Spacer(Modifier.height(4.dp))
+                            Text(
+                                "Pick an agent above and it runs your prompt on that host.",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = lapis.muted,
+                            )
+                        }
+                    }
+                }
+                items(ui.rows, key = { it.chat.id }) { row ->
+                    ChatRowCard(
+                        row = row,
+                        onOpen = { onOpenChat(row.chat.id) },
+                        onRename = { renaming = row },
+                        onArchive = { vm.archive(row.chat.id) },
+                        onDelete = { deleting = row },
+                    )
                 }
             }
         }
         ExtendedFloatingActionButton(
             onClick = {
-                when {
-                    ui.hosts.isEmpty() -> scope.launch {
-                        snackbar.showSnackbar("Add a host under Config before starting a chat")
-                    }
-
-                    ui.hostFilter != null -> vm.createChat(ui.hostFilter!!)
-                    ui.hosts.size == 1 -> vm.createChat(ui.hosts.first())
-                    else -> pickHost = true
+                if (ui.hosts.isEmpty()) {
+                    scope.launch { snackbar.showSnackbar("Add a host under Config before starting a chat") }
+                } else {
+                    pickHost = true
                 }
             },
             // Material clears the label's semantics on an extended FAB: the icon carries the name.
-            icon = { Icon(Icons.Default.Add, contentDescription = "New chat") },
-            text = { Text("New chat") },
+            icon = { Icon(Icons.Default.Add, contentDescription = "New session") },
+            text = { Text("New session") },
             modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp),
         )
     }
 
     if (pickHost) {
-        AlertDialog(
-            onDismissRequest = { pickHost = false },
-            title = { Text("Run on which host?") },
-            text = {
-                Column {
-                    ui.hosts.forEach { host ->
-                        TextButton(
-                            onClick = {
-                                pickHost = false
-                                vm.createChat(host)
-                            },
-                            modifier = Modifier.fillMaxWidth(),
-                        ) {
-                            Text(host + if (host == ui.activeHost) "  (active)" else "", style = LapisType.Mono)
-                        }
-                    }
-                }
+        NewSessionSheet(
+            ui = ui,
+            onPick = { host, agent ->
+                pickHost = false
+                vm.createChat(host, agent)
             },
-            confirmButton = {},
-            dismissButton = { OutlinedButton(onClick = { pickHost = false }) { Text("Cancel") } },
+            onDismiss = { pickHost = false },
         )
     }
     renaming?.let { row ->
@@ -231,6 +229,11 @@ fun ChatListScreen(session: LapisSession, snackbar: SnackbarHostState, onOpenCha
 }
 
 @Composable
+private fun SectionLabel(text: String, modifier: Modifier = Modifier) {
+    Text(text.uppercase(), style = LapisType.MonoLabel, color = lapis.muted, modifier = modifier)
+}
+
+@Composable
 private fun ChatRowCard(
     row: ChatRow,
     onOpen: () -> Unit,
@@ -250,6 +253,8 @@ private fun ChatRowCard(
         onClick = onOpen,
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
+            AgentLogo(chat.agent, size = 22.dp)
+            Spacer(Modifier.width(10.dp))
             if (row.active) {
                 StatusDot(lapis.blue, pulsing = true)
                 Spacer(Modifier.width(8.dp))
@@ -305,5 +310,5 @@ private fun ChatRowCard(
 private fun preview(message: Message): String = when (message.role) {
     Message.ROLE_TOOL -> "[${kindLabel(message.metadata.kind)}] ${message.content}"
     Message.ROLE_USER -> "You: ${message.content}"
-    else -> message.content
+    else -> markdownPlain(message.content)
 }

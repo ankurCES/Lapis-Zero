@@ -50,7 +50,12 @@ dump-frames:
 	  $(CARGO) run --manifest-path ui/Cargo.toml --release --no-default-features -- \
 	    --dump-frame $(DUMPS)/$$v.png --view $$v; \
 	done
+	@set -e; for theme in paper dark; do \
+	  $(CARGO) run --manifest-path ui/Cargo.toml --release --no-default-features -- \
+	    --dump-frame $(DUMPS)/screensaver_$$theme.png --screensaver --theme $$theme; \
+	done
 	@echo "wrote $(DUMPS)/{companion,ticker,menu,approval,prompt,setup,pairing_pin,pairing_qr}.png"
+	@echo "wrote $(DUMPS)/screensaver_{paper,dark}.png"
 
 # Cross-compile the CM0 binary: no SDL (`sim` off) so it links fbdev/evdev only.
 # Zig provides the aarch64-unknown-linux-gnu toolchain + libc, so no Docker/cross

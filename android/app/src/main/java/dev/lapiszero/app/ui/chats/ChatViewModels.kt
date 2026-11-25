@@ -116,6 +116,10 @@ class ChatListViewModel(private val repo: ChatRepository) : ViewModel() {
         val activeHost: String = "",
         val hostFilter: String? = null,
         val connection: ConnectionState = ConnectionState.CONNECTING,
+        /** Agent tools found on each host (absent: not asked yet, or device software without tools). */
+        val agents: Map<String, HostAgentsState> = emptyMap(),
+        /** The chats open as tabs, in tab order. */
+        val tabs: List<ChatRow> = emptyList(),
     )
 
     private val hostFilter = MutableStateFlow<String?>(null)
@@ -127,19 +131,29 @@ class ChatListViewModel(private val repo: ChatRepository) : ViewModel() {
     val created: SharedFlow<String> = _created.asSharedFlow()
 
     val ui: StateFlow<Ui> = combine(
-        repo.chats, repo.state, repo.approvals, hostFilter, combine(repo.connection, repo.hostAgents, ::Pair),
-    ) { chats, state, approvals, filter, (connection, agents) ->
+        repo.chats, repo.state, repo.approvals, hostFilter, combine(repo.connection, repo.hostAgents, repo.openTabs, ::Triple),
+    ) { chats, state, approvals, filter, (connection, agents, open) ->
         val hosts = state?.hosts ?: chats.map { it.hostId }.distinct()
         // A filter for a host that no longer exists would hide everything.
         val effective = filter?.takeIf { it in hosts }
+        val all = buildChatRows(chats, state, approvals, null, agents).associateBy { it.chat.id }
         Ui(
             rows = buildChatRows(chats, state, approvals, effective, agents),
             hosts = hosts,
             activeHost = state?.activeHost.orEmpty(),
             hostFilter = effective,
             connection = connection,
+            agents = agents,
+            tabs = open.mapNotNull { all[it] },
         )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), Ui())
+
+    init {
+        // Each host's tools, for the logos to start a session with. Asked once per host and kept.
+        viewModelScope.launch {
+            repo.state.mapNotNull { it?.hosts }.distinctUntilChanged().collect { hosts -> hosts.forEach { repo.loadHostAgents(it) } }
+        }
+    }
 
     fun setHostFilter(host: String?) {
         hostFilter.value = host
@@ -149,13 +163,16 @@ class ChatListViewModel(private val repo: ChatRepository) : ViewModel() {
         viewModelScope.launch { if (!repo.refreshChats()) _messages.emit("Could not refresh chats") }
     }
 
-    fun createChat(hostId: String) {
+    /** `agent`: a tool on the host for a session run by it; null for the device's own agent. */
+    fun createChat(hostId: String, agent: String? = null) {
         viewModelScope.launch {
-            repo.createChat(hostId)
+            repo.createChat(hostId, agent = agent)
                 .onSuccess { _created.emit(it.id) }
                 .onFailure { _messages.emit(it.message ?: "Could not create the chat") }
         }
     }
+
+    fun closeTab(chatId: String) = repo.closeTab(chatId)
 
     fun rename(chatId: String, title: String) = run("Could not rename the chat") { repo.renameChat(chatId, title) }
 

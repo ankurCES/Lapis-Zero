@@ -361,12 +361,30 @@ class ChatRepository(
         }
     }
 
-    suspend fun createChat(hostId: String, title: String? = null, policy: String? = null): Result<Chat> =
+    /**
+     * `agent`: a tool found on the host (`claude`, ...) for a session run by it; only sent to
+     * device software that has tools, and null (the device's own agent) is never sent.
+     */
+    suspend fun createChat(hostId: String, title: String? = null, policy: String? = null, agent: String? = null): Result<Chat> =
         call {
-            api.createChat(hostId, title?.takeIf { it.isNotBlank() }, policy).also {
+            val tool = agent?.takeIf { it != Chat.AGENT_LAPIS && checkSshSupport() is SshSupport.Ready }
+            api.createChat(hostId, title?.takeIf { it.isNotBlank() }, policy, tool).also {
                 upsertChat(it, fromEvent = false)
+                openTab(it.id)
             }
         }
+
+    private val _openTabs = MutableStateFlow<List<String>>(emptyList())
+
+    /**
+     * Chats open as tabs in the sessions screen, in the order they were opened.
+     * ponytail: kept for the app's lifetime, not across restarts; persist it if that is missed.
+     */
+    val openTabs: StateFlow<List<String>> = _openTabs.asStateFlow()
+
+    fun openTab(chatId: String) = _openTabs.update { if (chatId in it) it else it + chatId }
+
+    fun closeTab(chatId: String) = _openTabs.update { it - chatId }
 
     suspend fun renameChat(chatId: String, title: String): Result<Chat> =
         patchChat(chatId) { put("title", JsonPrimitive(title.trim())) }
@@ -380,7 +398,10 @@ class ChatRepository(
 
     suspend fun archiveChat(chatId: String, archived: Boolean = true): Result<Chat> =
         patchChat(chatId) { put("archived", JsonPrimitive(archived)) }.onSuccess { chat ->
-            if (chat.archived) _chats.update { list -> list.filterNot { it.id == chatId } }
+            if (chat.archived) {
+                _chats.update { list -> list.filterNot { it.id == chatId } }
+                closeTab(chatId)
+            }
         }
 
     private suspend fun patchChat(
@@ -410,6 +431,7 @@ class ChatRepository(
     suspend fun deleteChat(chatId: String): Result<Unit> = call {
         api.deleteChat(chatId)
         _chats.update { list -> list.filterNot { it.id == chatId } }
+        closeTab(chatId)
         threads.remove(chatId)
         cache.removeChat(deviceKey, chatId)
     }

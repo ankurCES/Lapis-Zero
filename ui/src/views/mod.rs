@@ -22,6 +22,7 @@ pub mod companion;
 pub mod menu;
 pub mod pairing;
 pub mod prompt;
+pub mod screensaver;
 pub mod setup;
 pub mod ticker;
 
@@ -183,6 +184,14 @@ pub struct App {
     /// The backlight is off (`--fb` loop): nobody can see the head, so it
     /// stops asking for frames of its own.
     backlight_off: bool,
+    /// Since when nothing has needed the user: the last key or wake, or the
+    /// last frame with something on it for them (see [`App::needs_user`]).
+    quiet_since: Instant,
+    /// The screensaver was up on the last frame ticked: the next key only
+    /// ends it. Latched until that key or the next tick, never by a daemon
+    /// frame, so a key meant to wake the screen never acts on a modal that
+    /// arrived unseen in between.
+    screensaver: bool,
     ticker: ticker::TickerView,
     menu: menu::MenuView,
     prompt: prompt::PromptView,
@@ -250,6 +259,8 @@ impl App {
             beat: None,
             pinned: None,
             backlight_off: false,
+            quiet_since: Instant::now(),
+            screensaver: false,
             ticker: ticker::TickerView::demo(),
             menu: menu::MenuView::demo(),
             prompt: prompt::PromptView::new(),
@@ -766,7 +777,45 @@ impl App {
 
     /// Name of the view on screen, for the journal (the device has no console).
     pub fn view_name(&self) -> &'static str {
-        self.view.name()
+        if self.screensaver {
+            "screensaver"
+        } else {
+            self.view.name()
+        }
+    }
+
+    /// True while the screensaver is up, as of the last [`App::tick`].
+    pub fn screensaver_on(&self) -> bool {
+        self.screensaver
+    }
+
+    /// Brings the screensaver up at the next tick, as if the device had been
+    /// left alone for [`screensaver::SCREENSAVER_AFTER`] (`--screensaver`).
+    /// It still only shows when nothing needs the user, and a key ends it.
+    pub fn start_screensaver(&mut self) {
+        // ponytail: an `Instant` cannot go back past the clock's origin, so
+        // on a machine up for less than 20 s this just waits out the delay.
+        if let Some(t) = Instant::now().checked_sub(screensaver::SCREENSAVER_AFTER) {
+            (self.last_input, self.quiet_since) = (t, t);
+        }
+    }
+
+    /// Something on screen is for the user, or would be under the
+    /// screensaver: it must not start over it, and ends for it. Called by
+    /// [`App::tick`] once `header.state` is current.
+    fn needs_user(&self) -> bool {
+        // Any state but idle: a task's steps, its ending beat, an approval,
+        // a pause, push-to-talk (also checked directly: a pinned state hides it).
+        self.header.state != MascotState::Idle
+            || self.ptt
+            || self.daemon.active_task.is_some()
+            || self.approval.is_some()
+            || self.pairing.is_some()
+            || matches!(self.view, View::Setup | View::Pairing)
+            || !self.prompt.buffer.is_empty()
+            || self.now < self.toast_until
+            // An idle face over a dead daemon would look like a healthy agent.
+            || self.offline
     }
 
     /// True while the pairing PIN or QR is showing: the idle policy must not
@@ -782,15 +831,25 @@ impl App {
     }
 
     /// Resets the idle timer without routing a key (wakes a blanked screen).
+    /// The screensaver gives way at the next tick.
     pub fn wake(&mut self) {
         self.last_input = Instant::now();
+        self.quiet_since = self.last_input;
     }
 
     /// Routes one semantic key. Returns the UI->daemon frame it produced, if any
     /// (SPEC 6.2); the caller owns the transport.
     pub fn key(&mut self, key: crate::backend::LapisKey) -> Option<Value> {
         use crate::backend::LapisKey as K;
-        self.last_input = Instant::now();
+        self.wake();
+        // The key that ends the screensaver does nothing else: what is behind
+        // it was not on show. The kill switch works from anywhere, and a
+        // push-to-talk release is never lost.
+        if std::mem::take(&mut self.screensaver)
+            && !matches!(key, K::EscHold | K::PushToTalk(false))
+        {
+            return None;
+        }
         // The pairing view is modal: ESC cancels the window, nothing else
         // navigates. The kill switch and push-to-talk edges stay global.
         if self.view == View::Pairing && !matches!(key, K::EscHold | K::PushToTalk(_)) {
@@ -916,6 +975,13 @@ impl App {
             self.beat = None;
         }
         self.header.state = self.state();
+        // The screensaver: up after a quiet spell, while the screen is lit.
+        // (Dark, the loop is back to its idle rate and draws the view.)
+        if self.needs_user() {
+            self.quiet_since = Instant::now();
+        }
+        self.screensaver =
+            !self.backlight_off && self.quiet_since.elapsed() >= screensaver::SCREENSAVER_AFTER;
         // `dt` is the time that led up to this frame: it belongs to the easing
         // already under way. A change of state starts its own with the next
         // frame's, or a long idle wait would be spent on it in one jump.
@@ -937,7 +1003,8 @@ impl App {
     }
 
     /// Adaptive frame interval (SPEC 5.2): 60 FPS animating, 12 agent-active, 1 idle
-    /// (4 while the idle head is on a lit screen, for its sway).
+    /// (4 while the idle head is on a lit screen, for its sway, and
+    /// [`screensaver::SCREENSAVER_FPS`] while the screensaver is up).
     pub fn frame_interval(&self) -> Duration {
         let input_recent = self.last_input.elapsed() < Duration::from_secs(2);
         let animating = self.sliding
@@ -950,6 +1017,9 @@ impl App {
         let head = self.view == View::Companion && !self.backlight_off;
         if animating || input_recent || (head && self.mascot.is_moving(self.now)) {
             return Duration::from_micros(16_667);
+        }
+        if self.screensaver {
+            return Duration::from_micros(1_000_000 / screensaver::SCREENSAVER_FPS);
         }
         match self.header.state {
             // The idle head's sway needs 4 FPS; each blink and glance is
@@ -966,7 +1036,10 @@ impl App {
     /// applies the theme, and keeps a copy for `screen_request`.
     pub fn render(&mut self, canvas: &mut Canvas) {
         canvas.clear(PAPER);
-        if self.sliding {
+        if self.screensaver {
+            let (minutes, now) = (self.header.minutes, self.now);
+            screensaver::render(canvas, &self.mascot, minutes, now, self.dark);
+        } else if self.sliding {
             // Taken out for the call and put back: nothing here allocates.
             let mut scratch = self.scratch.take().unwrap_or_default();
             scratch.clear(PAPER);
@@ -2755,5 +2828,123 @@ mod tests {
         }));
         app.set_wall_clock(1_795_438_264);
         assert_eq!(app.header.minutes, 60 + 51); // 01:51 next day at UTC+13
+    }
+
+    /// Brings up `app`'s screensaver at `now`, as a quiet spell would.
+    fn screensaver_at(app: &mut App, now: f64) {
+        app.start_screensaver();
+        app.tick(0.1, now);
+        assert!(app.screensaver_on(), "the screensaver is up at {now}");
+    }
+
+    #[test]
+    fn the_screensaver_waits_for_quiet_and_gives_way_to_the_user() {
+        let mut app = App::new();
+        app.tick(0.1, 10.0);
+        assert!(!app.screensaver_on(), "not before the quiet spell");
+        screensaver_at(&mut app, 10.1);
+        assert_eq!(app.view_name(), "screensaver");
+        let rate = Duration::from_micros(1_000_000 / screensaver::SCREENSAVER_FPS);
+        assert_eq!(app.frame_interval(), rate);
+        // Full screen: no status bar, a big head, and it drifts.
+        let (mut a, mut b) = (Canvas::new(), Canvas::new());
+        app.render(&mut a);
+        let row = |c: &Canvas, y| {
+            (0..WIDTH)
+                .filter(|&x| c.get_pixel(x, y) != Some(PAPER))
+                .count()
+        };
+        assert!(row(&a, RULE_Y) < WIDTH as usize / 2, "no status bar rule");
+        let drawn: usize = (0..crate::gfx::canvas::HEIGHT).map(|y| row(&a, y)).sum();
+        assert!(drawn > 3000, "{drawn} pixels of head");
+        app.tick(0.1, 15.0);
+        app.render(&mut b);
+        assert_ne!(a.pixels(), b.pixels());
+
+        // Dark, the loop is back at its idle rate and draws the plain view.
+        app.set_backlight_off(true);
+        app.tick(0.1, 16.0);
+        assert!(!app.screensaver_on());
+        assert_eq!(app.view_name(), "companion");
+        assert_eq!(app.frame_interval(), Duration::from_secs(1));
+
+        // Whatever needs the user ends it at once, and it does not come back
+        // over it however long that stays.
+        type Interrupt = fn(&mut App);
+        let interruptions: [(&str, Interrupt); 7] = [
+            ("approval", |app| {
+                app.on_daemon_message(approval_frame("r1"))
+            }),
+            ("task", |app| app.on_daemon_message(sync("THINKING", true))),
+            ("toast", |app| app.on_daemon_message(toast("info"))),
+            ("pairing", |app| app.on_daemon_message(pin_frame("waiting"))),
+            ("setup", |app| app.set_view(View::Setup)),
+            ("prompt", |app| {
+                app.set_view(View::Prompt);
+                app.prompt.push('h');
+            }),
+            ("offline", |app| app.set_offline(true)),
+        ];
+        for (what, interrupt) in interruptions {
+            let mut app = App::new();
+            screensaver_at(&mut app, 50.0);
+            interrupt(&mut app);
+            app.tick(0.1, 50.1);
+            assert!(!app.screensaver_on(), "{what}: still up");
+            app.start_screensaver();
+            app.tick(0.1, 50.2);
+            assert!(!app.screensaver_on(), "{what}: back over it");
+        }
+        // Once it is over the quiet spell starts again: a toast is on show
+        // for its four seconds, then for SCREENSAVER_AFTER more.
+        let mut app = App::new();
+        screensaver_at(&mut app, 50.0);
+        app.on_daemon_message(toast("info"));
+        app.tick(0.1, 50.1);
+        app.tick(0.1, 55.0);
+        assert!(app.now > app.toast_until && !app.screensaver_on());
+    }
+
+    #[test]
+    fn the_key_that_ends_the_screensaver_does_nothing_else() {
+        use crate::backend::LapisKey as K;
+        use serde_json::json;
+        let mut app = App::new();
+        screensaver_at(&mut app, 10.0);
+        // `c` would cycle to the ticker; here it only wakes the screen.
+        assert_eq!(app.key(K::Char('c')), None);
+        app.tick(0.1, 10.1);
+        assert!(!app.screensaver_on());
+        assert_eq!(app.view, View::Companion);
+        assert!(app.idle_ms() < 1000, "the backlight comes back up");
+        app.key(K::Char('c'));
+        assert_eq!(app.view, View::Ticker, "the next key acts");
+
+        // An approval landing between two frames is not decided by the key
+        // meant to wake the screen: it was never on show.
+        screensaver_at(&mut app, 20.0);
+        app.on_daemon_message(approval_frame("r1"));
+        assert_eq!(app.key(K::Enter), None);
+        assert!(app.approval.is_some());
+        app.tick(0.1, 20.1);
+        assert_eq!(app.view, View::Approval);
+        assert!(app.key(K::Enter).is_some(), "once seen, it can be approved");
+
+        // The kill switch (ESC held 1.5 s) works from the screensaver.
+        screensaver_at(&mut app, 30.0);
+        assert_eq!(
+            app.key(K::EscHold),
+            Some(json!({"type": "agent_control", "command": "kill_all"}))
+        );
+        app.tick(0.1, 30.1);
+        assert!(!app.screensaver_on());
+        // A push-to-talk press only wakes; a release is never lost.
+        screensaver_at(&mut app, 40.0);
+        assert_eq!(app.key(K::PushToTalk(true)), None);
+        screensaver_at(&mut app, 50.0);
+        assert_eq!(
+            app.key(K::PushToTalk(false)),
+            Some(json!({"type": "ptt_audio", "state": "stop"}))
+        );
     }
 }

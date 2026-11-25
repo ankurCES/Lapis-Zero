@@ -122,3 +122,30 @@ fn a_companion_frame_never_allocates() {
         }
     }
 }
+
+#[test]
+fn a_screensaver_frame_never_allocates() {
+    // Ten seconds of the screensaver at its own rate, blinks included, in
+    // both themes: it runs for a minute at a time on an idle device.
+    let mut app = App::new();
+    let mut canvas = Canvas::new();
+    for theme in ["paper", "dark"] {
+        app.on_daemon_message(serde_json::json!({"type": "ui_settings", "theme": theme}));
+        app.start_screensaver();
+        app.tick(1.0 / 12.0, 0.0);
+        app.render(&mut canvas);
+        assert!(app.screensaver_on());
+        let count = allocations(|| {
+            for frame in 1..120 {
+                app.tick(1.0 / 12.0, f64::from(frame) / 12.0);
+                app.render(&mut canvas);
+                std::hint::black_box(app.frame_interval());
+            }
+        });
+        assert!(app.screensaver_on());
+        assert_eq!(
+            count, 0,
+            "{theme}: {count} heap allocations in a screensaver frame"
+        );
+    }
+}

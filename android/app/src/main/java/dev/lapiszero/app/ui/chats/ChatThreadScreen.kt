@@ -1,6 +1,18 @@
 package dev.lapiszero.app.ui.chats
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
+import dev.lapiszero.app.ui.components.AgentLogo
+import dev.lapiszero.app.data.remote.Chat
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.draw.clip
+import androidx.compose.material3.TextFieldDefaults
+import androidx.compose.material3.TextField
+import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -27,7 +39,6 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -115,23 +126,15 @@ fun ChatThreadScreen(
         if (itemCount > 0) listState.animateScrollToItem(listState.layoutInfo.totalItemsCount.coerceAtLeast(1) - 1)
     }
 
-    Column(Modifier.fillMaxSize().imePadding()) {
-        // Header: title, host and policy for this chat.
-        Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp)) {
-            Text(
-                chat?.title?.ifBlank { "Untitled chat" } ?: "Loading…",
-                style = MaterialTheme.typography.titleMedium,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-        }
-        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+    val agent = runWith.current
+    val items = remember(thread.messages) { groupThread(thread.messages) }
 
+    Column(Modifier.fillMaxSize().imePadding()) {
         LazyColumn(
             state = listState,
             modifier = Modifier.weight(1f).fillMaxWidth(),
-            contentPadding = PaddingValues(16.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
+            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
             if (thread.hasMore) {
                 item(key = "older") {
@@ -144,30 +147,16 @@ fun ChatThreadScreen(
                 item(key = "error") { ErrorRetry(error, onRetry = vm::reload) }
             }
             if (thread.messages.isEmpty() && thread.pending.isEmpty() && thread.error == null) {
-                item(key = "empty") {
-                    // A new chat: the agent, at rest, waiting to be told.
-                    Column(
-                        Modifier.fillMaxWidth().padding(vertical = 24.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                    ) {
-                        LapisHead(HeadState.IDLE, size = 112.dp)
-                        Spacer(Modifier.height(8.dp))
-                        Text(
-                            if (thread.loading) "Loading conversation…" else
-                                "Describe what the agent should do on ${chat?.hostId ?: "the host"}.",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = lapis.muted,
-                            textAlign = TextAlign.Center,
-                        )
-                    }
-                }
+                item(key = "empty") { EmptySession(agent, chat?.hostId, thread.loading) }
             }
-            items(thread.messages, key = { it.id }) { message ->
-                when (message.role) {
-                    Message.ROLE_USER -> UserBubble(message.content, sourceLabel(message.metadata.source), pending = false)
-                    Message.ROLE_TOOL -> ToolCallCard(message, session.shots, onOpenShot = { viewer = it })
-                    Message.ROLE_SYSTEM -> SystemNote(message.content)
-                    else -> AssistantBubble(message)
+            items(items, key = { it.key }) { item ->
+                when (item) {
+                    is ThreadItem.Steps -> StepsBlock(item.steps, session.shots, live = ui.running && item === items.last(), onOpenShot = { viewer = it })
+                    is ThreadItem.Single -> when (item.message.role) {
+                        Message.ROLE_USER -> UserBubble(item.message.content, sourceLabel(item.message.metadata.source), pending = false)
+                        Message.ROLE_SYSTEM -> SystemNote(item.message.content)
+                        else -> AssistantMessage(item.message, agent)
+                    }
                 }
             }
             items(thread.pending, key = { it.localId }) { pending ->
@@ -175,7 +164,7 @@ fun ChatThreadScreen(
             }
             if (ui.running) {
                 item(key = "running") {
-                    RunningRow(head, ui.agentState, ui.step, ui.maxSteps, runWith.current.label.takeIf { runWith.usesTool }, ui.progress)
+                    RunningRow(head, ui.agentState, ui.step, ui.maxSteps, agent.label.takeIf { runWith.usesTool }, ui.progress)
                 }
             }
         }
@@ -265,35 +254,75 @@ private fun sourceLabel(source: String?): String? = when {
     else -> source
 }
 
+/** What a thread shows: one message, or a run of tool steps folded into one block. */
+sealed interface ThreadItem {
+    val key: Any
+
+    data class Single(val message: Message) : ThreadItem {
+        override val key: Any get() = message.id
+    }
+
+    data class Steps(val steps: List<Message>) : ThreadItem {
+        override val key: Any get() = "steps-${steps.first().id}"
+    }
+}
+
+/** Consecutive tool messages become one [ThreadItem.Steps]; everything else stays as it is. */
+fun groupThread(messages: List<Message>): List<ThreadItem> {
+    val out = mutableListOf<ThreadItem>()
+    for (message in messages) {
+        val last = out.lastOrNull()
+        out += when {
+            message.role != Message.ROLE_TOOL -> ThreadItem.Single(message)
+            last is ThreadItem.Steps -> { out.removeAt(out.lastIndex); ThreadItem.Steps(last.steps + message) }
+            else -> ThreadItem.Steps(listOf(message))
+        }
+    }
+    return out
+}
+
+private val UserShape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp, bottomStart = 20.dp, bottomEnd = 6.dp)
+
 @Composable
 private fun UserBubble(text: String, caption: String?, pending: Boolean) {
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+    Row(Modifier.fillMaxWidth().padding(start = 48.dp), horizontalArrangement = Arrangement.End) {
         Column(horizontalAlignment = Alignment.End, modifier = Modifier.alpha(if (pending) 0.6f else 1f)) {
             Surface(
                 color = MaterialTheme.colorScheme.primary,
                 contentColor = MaterialTheme.colorScheme.onPrimary,
-                shape = MaterialTheme.shapes.large,
-                modifier = Modifier.widthIn(max = 320.dp),
-            ) { Text(text, style = MaterialTheme.typography.bodyLarge, modifier = Modifier.padding(12.dp)) }
-            if (caption != null) Text(caption, style = LapisType.MonoSmall, color = lapis.muted)
+                shape = UserShape,
+            ) {
+                SelectionContainer {
+                    Text(text, style = MaterialTheme.typography.bodyLarge, modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp))
+                }
+            }
+            if (caption != null) {
+                Text(caption, style = LapisType.MonoSmall, color = lapis.muted, modifier = Modifier.padding(top = 4.dp, end = 4.dp))
+            }
         }
     }
 }
 
+/**
+ * The answer: who gave it, then the text as rendered Markdown. No bubble: answers get the width.
+ * ponytail: "who" is the chat's agent now; messages do not record which agent answered, so an
+ * answer from before a switch shows the new one. Add the agent to the message if that matters.
+ */
 @Composable
-private fun AssistantBubble(message: Message) {
+private fun AssistantMessage(message: Message, agent: HostAgent) {
     val status = message.metadata.status
-    Row(Modifier.fillMaxWidth()) {
-        Column {
-            Surface(
-                color = MaterialTheme.colorScheme.surfaceContainerHigh,
-                shape = MaterialTheme.shapes.large,
-                modifier = Modifier.widthIn(max = 340.dp),
-            ) { Text(message.content, style = MaterialTheme.typography.bodyLarge, modifier = Modifier.padding(12.dp)) }
+    Column(Modifier.fillMaxWidth()) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            AgentLogo(agent.id, size = 18.dp)
+            Spacer(Modifier.width(8.dp))
+            Text(agent.label, style = MaterialTheme.typography.labelLarge, color = lapis.muted)
             if (status != null && status != "done") {
+                Spacer(Modifier.width(8.dp))
                 LapisBadge(status, color = if (status == "failed") lapis.danger else lapis.amber)
             }
         }
+        Spacer(Modifier.height(6.dp))
+        MarkdownText(message.content)
     }
 }
 
@@ -303,83 +332,64 @@ private fun SystemNote(text: String) {
         text,
         style = LapisType.MonoSmall,
         color = lapis.muted,
-        modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+        textAlign = TextAlign.Center,
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp),
     )
 }
 
-/** Collapsible tool call: `[SSH] git status`, status, detail and the target-screen frame. */
+/** A new session: who will answer, and where. */
 @Composable
-private fun ToolCallCard(message: Message, shots: ScreenshotStore, onOpenShot: (Long) -> Unit) {
-    val meta = message.metadata
-    var expanded by rememberSaveable(message.id) { mutableStateOf(false) }
-    val statusColor = when (meta.status) {
-        "denied" -> lapis.amber
-        "error" -> lapis.danger
-        else -> lapis.muted
-    }
-    Surface(
-        color = MaterialTheme.colorScheme.surfaceContainerLow,
-        shape = MaterialTheme.shapes.small,
-        border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-        modifier = Modifier.fillMaxWidth().clickable(onClickLabel = "Toggle details") { expanded = !expanded },
+private fun EmptySession(agent: HostAgent, host: String?, loading: Boolean) {
+    Column(
+        Modifier.fillMaxWidth().padding(vertical = 32.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        Column(Modifier.padding(10.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                LapisBadge(kindLabel(meta.kind), color = MaterialTheme.colorScheme.onSurface, filled = true)
-                Text(
-                    message.content,
-                    style = LapisType.Mono,
-                    maxLines = if (expanded) Int.MAX_VALUE else 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f),
-                )
-                if (meta.status != null && meta.status != "ok") LapisBadge(meta.status, color = statusColor)
-                Text(if (expanded) "▴" else "▾", color = lapis.muted)
-            }
-            if (!expanded && !meta.detail.isNullOrBlank()) {
-                Text(
-                    "-> ${meta.detail}",
-                    style = LapisType.MonoSmall,
-                    color = lapis.muted,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            }
-            AnimatedVisibility(expanded) {
-                Column {
-                    Spacer(Modifier.height(6.dp))
-                    if (!meta.detail.isNullOrBlank()) {
-                        Text(
-                            meta.detail,
-                            style = LapisType.MonoSmall,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .background(MaterialTheme.colorScheme.surfaceContainerHighest)
-                                .padding(8.dp),
-                        )
-                    }
-                    Text(
-                        listOfNotNull(
-                            meta.step?.let { "step $it" },
-                            (meta.ts ?: message.createdAt).takeIf { it > 0 }?.let(::formatClock),
-                            meta.kind,
-                        ).joinToString("  ·  "),
-                        style = LapisType.MonoSmall,
-                        color = lapis.muted,
-                        modifier = Modifier.padding(top = 4.dp),
-                    )
-                }
-            }
-            meta.screenshotId?.let { id ->
-                Spacer(Modifier.height(6.dp))
-                ScreenshotThumb(
-                    shots,
-                    id,
-                    modifier = Modifier.width(if (expanded) 280.dp else 132.dp),
-                    onClick = { onOpenShot(id) },
-                )
-            }
+        if (agent.id == Chat.AGENT_LAPIS) {
+            LapisHead(HeadState.IDLE, size = 112.dp)
+        } else {
+            AgentLogo(agent.id, size = 56.dp)
+            Spacer(Modifier.height(12.dp))
+            Text(agent.label, style = MaterialTheme.typography.titleMedium)
         }
+        Spacer(Modifier.height(8.dp))
+        Text(
+            when {
+                loading -> "Loading conversation…"
+                agent.id == Chat.AGENT_LAPIS -> "Describe what the agent should do on ${host ?: "the host"}."
+                else -> "Ask ${agent.label} to work on ${host ?: "the host"}."
+            },
+            style = MaterialTheme.typography.bodyMedium,
+            color = lapis.muted,
+            textAlign = TextAlign.Center,
+        )
+    }
+}
+
+/**
+ * A run of tool steps. One step shows as it is; more fold under "N steps" with the latest in
+ * view, and open while the task runs.
+ */
+@Composable
+private fun StepsBlock(steps: List<Message>, shots: ScreenshotStore, live: Boolean, onOpenShot: (Long) -> Unit) {
+    if (steps.size == 1) {
+        ToolCallCard(steps.first(), shots, onOpenShot)
+        return
+    }
+    var open by rememberSaveable(steps.first().id) { mutableStateOf(false) }
+    val shown = open || live
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Row(
+            Modifier
+                .clip(RoundedCornerShape(8.dp))
+                .clickable(onClickLabel = if (shown) "Fold steps" else "Show all steps") { open = !shown }
+                .padding(vertical = 4.dp, horizontal = 2.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text("${steps.size} steps", style = LapisType.MonoLabel, color = lapis.muted)
+            Spacer(Modifier.width(6.dp))
+            Text(if (shown) "▴" else "▾", color = lapis.muted)
+        }
+        (if (shown) steps else steps.takeLast(1)).forEach { ToolCallCard(it, shots, onOpenShot) }
     }
 }
 
@@ -410,6 +420,85 @@ private fun RunningRow(head: HeadState, agentState: String, step: Int, maxSteps:
     }
 }
 
+/** Collapsible tool call: `[SSH] git status`, status, detail and the target-screen frame. */
+@Composable
+private fun ToolCallCard(message: Message, shots: ScreenshotStore, onOpenShot: (Long) -> Unit) {
+    val meta = message.metadata
+    var expanded by rememberSaveable(message.id) { mutableStateOf(false) }
+    val statusColor = when (meta.status) {
+        "denied" -> lapis.amber
+        "error" -> lapis.danger
+        else -> lapis.muted
+    }
+    Surface(
+        color = MaterialTheme.colorScheme.surfaceContainerLow,
+        shape = RoundedCornerShape(12.dp),
+        modifier = Modifier.fillMaxWidth().clickable(onClickLabel = "Toggle details") { expanded = !expanded },
+    ) {
+        Column(Modifier.padding(horizontal = 12.dp, vertical = 10.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                LapisBadge(kindLabel(meta.kind), color = lapis.muted)
+                Text(
+                    message.content,
+                    style = LapisType.Mono,
+                    maxLines = if (expanded) Int.MAX_VALUE else 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
+                if (meta.status != null && meta.status != "ok") LapisBadge(meta.status, color = statusColor)
+                Text(if (expanded) "▴" else "▾", color = lapis.muted)
+            }
+            if (!expanded && !meta.detail.isNullOrBlank()) {
+                Text(
+                    "-> ${meta.detail}",
+                    style = LapisType.MonoSmall,
+                    color = lapis.muted,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.padding(top = 4.dp),
+                )
+            }
+            AnimatedVisibility(expanded) {
+                Column {
+                    Spacer(Modifier.height(8.dp))
+                    if (!meta.detail.isNullOrBlank()) {
+                        SelectionContainer {
+                            Text(
+                                meta.detail,
+                                style = LapisType.MonoSmall,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .background(MaterialTheme.colorScheme.surfaceContainerHighest, RoundedCornerShape(8.dp))
+                                    .padding(8.dp),
+                            )
+                        }
+                    }
+                    Text(
+                        listOfNotNull(
+                            meta.step?.let { "step $it" },
+                            (meta.ts ?: message.createdAt).takeIf { it > 0 }?.let(::formatClock),
+                            meta.kind,
+                        ).joinToString("  ·  "),
+                        style = LapisType.MonoSmall,
+                        color = lapis.muted,
+                        modifier = Modifier.padding(top = 4.dp),
+                    )
+                }
+            }
+            meta.screenshotId?.let { id ->
+                Spacer(Modifier.height(8.dp))
+                ScreenshotThumb(
+                    shots,
+                    id,
+                    modifier = Modifier.width(if (expanded) 280.dp else 132.dp).clip(RoundedCornerShape(6.dp)),
+                    onClick = { onOpenShot(id) },
+                )
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun Composer(
     draft: String,
@@ -428,33 +517,17 @@ private fun Composer(
     onStop: () -> Unit,
     onKill: () -> Unit,
 ) {
-    Surface(color = MaterialTheme.colorScheme.surfaceContainer, modifier = Modifier.fillMaxWidth()) {
-        Column(Modifier.navigationBarsPadding().padding(horizontal = 12.dp, vertical = 8.dp)) {
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                ChoiceBadge(
-                    label = host.ifEmpty { "host" },
-                    options = ui.hosts,
-                    optionLabel = { it },
-                    onPick = onHost,
-                    color = lapis.blue,
-                    enabled = !ui.running && ui.hosts.isNotEmpty(),
-                )
-                ChoiceBadge(
-                    label = policyLabel(policy),
-                    options = POLICY_OPTIONS,
-                    optionLabel = { policyLabel(it) },
-                    onPick = onPolicy,
-                    color = if (policy == "autonomous") lapis.amber else MaterialTheme.colorScheme.onSurface,
-                    enabled = !ui.running,
-                )
-                Spacer(Modifier.weight(1f))
-                if (ui.busyElsewhere) LapisBadge("agent busy elsewhere", color = lapis.amber)
-                if (ui.connection != ConnectionState.ONLINE) LapisBadge("offline", color = lapis.danger)
-            }
-            Spacer(Modifier.height(6.dp))
-            // Who answers: the device's own agent, or a tool found on the host (Claude Code, ...).
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text("RUN WITH", style = LapisType.MonoLabel, color = lapis.muted)
+    Column(Modifier.fillMaxWidth().navigationBarsPadding().padding(start = 12.dp, end = 12.dp, top = 4.dp, bottom = 8.dp)) {
+        // The session's settings: who answers, in which folder, where, how freely. Wraps as needed.
+        FlowRow(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+            itemVerticalAlignment = Alignment.CenterVertically,
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                AgentLogo(runWith.current.id, size = 18.dp)
+                Spacer(Modifier.width(6.dp))
                 ChoiceBadge(
                     label = runWith.current.label,
                     // The entry after the tools (null) looks for them again.
@@ -469,56 +542,97 @@ private fun Composer(
                     color = if (runWith.usesTool) lapis.blue else MaterialTheme.colorScheme.onSurface,
                     enabled = runWith.enabled && !ui.running,
                 )
-                if (runWith.usesTool) {
+            }
+            if (runWith.usesTool) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
                     LapisBadge("Folder", color = lapis.muted, onClick = if (ui.running) null else onFolder)
+                    Spacer(Modifier.width(6.dp))
                     // Not in the badge: badges are set in capitals and a path is case-sensitive.
                     Text(runWith.workdir.ifEmpty { "~" }, style = LapisType.Mono, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
             }
-            runWith.note?.let {
-                Text(it, style = MaterialTheme.typography.bodySmall, color = lapis.muted, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            ChoiceBadge(
+                label = host.ifEmpty { "host" },
+                options = ui.hosts,
+                optionLabel = { it },
+                onPick = onHost,
+                color = lapis.blue,
+                enabled = !ui.running && ui.hosts.isNotEmpty(),
+            )
+            ChoiceBadge(
+                label = policyLabel(policy),
+                options = POLICY_OPTIONS,
+                optionLabel = { policyLabel(it) },
+                onPick = onPolicy,
+                color = if (policy == "autonomous") lapis.amber else MaterialTheme.colorScheme.onSurface,
+                enabled = !ui.running,
+            )
+            if (ui.busyElsewhere) LapisBadge("agent busy elsewhere", color = lapis.amber)
+            if (ui.connection != ConnectionState.ONLINE) LapisBadge("offline", color = lapis.danger)
+        }
+        runWith.note?.let {
+            Text(
+                it,
+                style = MaterialTheme.typography.bodySmall,
+                color = lapis.muted,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.padding(top = 4.dp),
+            )
+        }
+        Spacer(Modifier.height(8.dp))
+        if (ui.running) {
+            // Unmistakable while a task runs: STOP this task, or KILL everything.
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                Button(
+                    onClick = onStop,
+                    colors = ButtonDefaults.buttonColors(containerColor = lapis.amber, contentColor = lapis.ink),
+                    shape = RoundedCornerShape(26.dp),
+                    modifier = Modifier.weight(1f).height(52.dp),
+                ) { Text("■  STOP TASK", style = LapisType.MonoLabel) }
+                Button(
+                    onClick = onKill,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.error,
+                        contentColor = MaterialTheme.colorScheme.onError,
+                    ),
+                    shape = RoundedCornerShape(26.dp),
+                    modifier = Modifier.height(52.dp),
+                ) { Text("KILL ALL", style = LapisType.MonoLabel) }
             }
-            Spacer(Modifier.height(6.dp))
-            if (ui.running) {
-                // Unmistakable while a task runs: STOP this task, or KILL everything.
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Button(
-                        onClick = onStop,
-                        colors = ButtonDefaults.buttonColors(containerColor = lapis.amber, contentColor = lapis.ink),
-                        shape = MaterialTheme.shapes.small,
-                        modifier = Modifier.weight(1f).height(52.dp),
-                    ) { Text("■  STOP TASK", style = LapisType.MonoLabel) }
-                    Button(
-                        onClick = onKill,
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = MaterialTheme.colorScheme.error,
-                            contentColor = MaterialTheme.colorScheme.onError,
-                        ),
-                        shape = MaterialTheme.shapes.small,
-                        modifier = Modifier.height(52.dp),
-                    ) { Text("KILL ALL", style = LapisType.MonoLabel) }
-                }
-            } else {
-                Row(verticalAlignment = Alignment.Bottom) {
-                    OutlinedTextField(
+        } else {
+            // One rounded field with the send button inside it.
+            Surface(color = MaterialTheme.colorScheme.surfaceContainerHigh, shape = RoundedCornerShape(26.dp)) {
+                Row(verticalAlignment = Alignment.Bottom, modifier = Modifier.padding(end = 6.dp, bottom = 6.dp)) {
+                    TextField(
                         value = draft,
                         onValueChange = onDraft,
-                        placeholder = { Text("Ask the agent…") },
-                        maxLines = 5,
+                        placeholder = {
+                            Text(if (runWith.usesTool) "Message ${runWith.current.label}…" else "Ask the agent…")
+                        },
+                        maxLines = 6,
                         keyboardOptions = KeyboardOptions(
                             capitalization = KeyboardCapitalization.Sentences,
                             imeAction = ImeAction.Send,
                         ),
                         keyboardActions = KeyboardActions(onSend = { onSend() }),
+                        colors = TextFieldDefaults.colors(
+                            focusedContainerColor = Color.Transparent,
+                            unfocusedContainerColor = Color.Transparent,
+                            disabledContainerColor = Color.Transparent,
+                            focusedIndicatorColor = Color.Transparent,
+                            unfocusedIndicatorColor = Color.Transparent,
+                            disabledIndicatorColor = Color.Transparent,
+                        ),
                         modifier = Modifier.weight(1f),
                     )
-                    Spacer(Modifier.width(8.dp))
                     Box(contentAlignment = Alignment.Center) {
                         FilledIconButton(
                             onClick = onSend,
                             enabled = draft.isNotBlank() && !sending,
-                            modifier = Modifier.size(52.dp),
-                        ) { Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send") }
+                            shape = CircleShape,
+                            modifier = Modifier.size(44.dp),
+                        ) { Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send", modifier = Modifier.size(20.dp)) }
                         if (sending) CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp)
                     }
                 }

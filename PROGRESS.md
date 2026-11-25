@@ -898,3 +898,29 @@ fingerprints, device ids, host output and every picture of a host's or the devic
 blurred (coarse blocks, then a blur). `screenshots/cardputerZero/` is unchanged (demo data, no
 personal details).
 
+
+## 0.3.2: screensaver on the device, chat overhaul in the app (2026-11-25)
+
+Device: after 20 s idle with nothing waiting on the owner, the agent head fills the LCD (12 fps,
+drifting, with a clock); the waking key is swallowed except Esc-hold and push-to-talk release.
+`ui/src/views/screensaver.rs`. App (no daemon change, works with 0.3.1): tool logos, sessions as
+tabs, a "Start a session" row per host, user bubbles, Markdown answers, folded tool steps,
+plain-text previews. Checked: cargo 111+3, clippy, fmt; daemon 283 passed, 1 xfailed; app 260
+tests, lint. The app is installed on the phone.
+
+### Image 0.3.2 (built and flashed 2026-11-25)
+
+| File | Bytes | SHA-256 |
+|---|---|---|
+| `os/deploy/lapis-zero-arm64.img.xz` | 639,245,984 | `68cd2d9781e65967c15f6542226b62f624bcdf85c91b6578ed03641c4aa478d9` |
+| `os/deploy/lapis-zero-arm64.img` | 5,368,709,120 | `b8cae34048fe98e71fc9d0572c8fb25eb17d66fef5bfa1c64396a45cc4ee9382` |
+| `os/deploy/os-list.json` | 1,562 | `c1defe1f96b06842d54a6b218b45b15173b7427b6fb6fb86c8b6ff1dfa33e324` |
+
+0.3.1 moved to `os/deploy/previous/lapis-zero-arm64-0.3.1.img.xz`. In the image: `lapis-ui`
+byte-identical to the fresh cross build (has `--screensaver`), daemon wheel 0.3.2, hostname
+`lapis-zero`, cloud-init off. Not repeated this time: the simulated boots and the Bluetooth rig.
+
+Flashed with `dd` to the 1 TB card in the built-in reader. macOS mounted `bootfs` right after the
+write and added `.Spotlight-V100` and `.fseventsd`, so the whole-card hash differs; checked by
+part instead: every boot file identical to the image's, root partition (`64bdd308...`) and
+partition table (`cdee224a...`) identical. Not yet booted.

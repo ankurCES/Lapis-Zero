@@ -81,7 +81,7 @@ import dev.lapiszero.app.theme.LapisType
 import dev.lapiszero.app.theme.lapis
 import dev.lapiszero.app.ui.chats.ApprovalViewModel
 import dev.lapiszero.app.ui.chats.ChatListScreen
-import dev.lapiszero.app.ui.chats.ChatThreadScreen
+import dev.lapiszero.app.ui.chats.SessionsScreen
 import dev.lapiszero.app.ui.components.ApprovalCard
 import dev.lapiszero.app.ui.components.CollectMessages
 import dev.lapiszero.app.ui.components.ConfirmDialog
@@ -355,7 +355,7 @@ private fun ShellNavHost(
         }
         composable(Routes.CHAT) { entry ->
             val chatId = entry.arguments?.getString("chatId").orEmpty()
-            ChatThreadScreen(session, chatId, snackbar, approvals)
+            SessionsScreen(session, chatId, snackbar, approvals, onAllClosed = { nav.popBackStack() })
         }
         composable(Routes.KVM) { KvmScreen(session, snackbar) }
         composable(Routes.DEVICE) { DeviceScreen(session, snackbar) }
@@ -364,7 +364,7 @@ private fun ShellNavHost(
 }
 
 private fun titleFor(route: String): String = when {
-    route.startsWith("chat/") -> "Chat"
+    route.startsWith("chat/") -> "Sessions"
     else -> ConfigRoutes.title(route)
 }
 

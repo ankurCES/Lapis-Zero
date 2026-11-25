@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "lapis-daemon"
-version = "0.3.1"
+version = "0.3.2"
 description = "Lapis-Zero OS autonomous Option C KVM agent daemon"
 requires-python = ">=3.12"
 dependencies = [

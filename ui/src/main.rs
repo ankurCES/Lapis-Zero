@@ -1,4 +1,5 @@
-//! `lapis-ui`: Lapis-Zero OS 320x170 UI. CLI: `--sim`, `--demo`, `--dump-frame`, `--socket`.
+//! `lapis-ui`: Lapis-Zero OS 320x170 UI. CLI: `--sim`, `--demo`, `--dump-frame`, `--socket`,
+//! `--screensaver`.
 
 use std::fs::File;
 use std::io::BufWriter;
@@ -14,9 +15,10 @@ lapis-ui - Lapis-Zero OS display UI
 
 USAGE:
     lapis-ui [--sim] [--demo] [--view <name>] [--state <name>] [--socket <path>]
+             [--screensaver]
     lapis-ui --dump-frame <path.png> [--view <name>] [--socket <path>]
              [--state <name>] [--from <name>] [--time <seconds>]
-             [--theme <name>] [--rms <level>]
+             [--theme <name>] [--rms <level>] [--screensaver]
     lapis-ui --bench-head
 
 OPTIONS:
@@ -37,6 +39,8 @@ OPTIONS:
                           take the frame --time seconds into the change
     --theme <name>        Dump only: paper (default) or dark
     --rms <level>         Dump only: microphone level 0..1 for the listening head
+    --screensaver         Dump and sim: start with the idle screensaver up (it
+                          otherwise comes after 20 s with nothing for the user)
     --bench-head          Time the head's draw call, state by state, and exit
     --help                Show this help
 ";
@@ -55,6 +59,7 @@ struct Args {
     time: Option<f64>,
     dark: bool,
     rms: Option<f32>,
+    screensaver: bool,
 }
 
 fn usage_err(msg: &str) -> ExitCode {
@@ -70,6 +75,7 @@ fn main() -> ExitCode {
             "--sim" => args.sim = true,
             "--demo" => args.demo = true,
             "--fb" => args.fb = true,
+            "--screensaver" => args.screensaver = true,
             "--bench-head" => return bench_head(),
             "--dump-frame" | "--view" | "--socket" | "--state" | "--from" | "--time"
             | "--theme" | "--rms" => {
@@ -140,6 +146,9 @@ fn main() -> ExitCode {
         // Settled, deterministic snapshot: pinned desk clock, no slide/motion,
         // and any modal snap-rested so borders/preview land predictably.
         app.settle_all();
+        if args.screensaver {
+            app.start_screensaver();
+        }
         let time = args.time.unwrap_or(f64::from(DUMP_CLOCK) * 60.0);
         match (args.from, args.state) {
             // The frame `time` seconds into the eased change between two
@@ -154,11 +163,19 @@ fn main() -> ExitCode {
             }
             _ => app.tick(1.0 / 60.0, time),
         }
+        if args.screensaver && !app.screensaver_on() {
+            return usage_err("--screensaver: not over a screen that is for the user");
+        }
+        let shown = if args.screensaver {
+            "screensaver"
+        } else {
+            view
+        };
         let mut canvas = Canvas::new();
         app.render(&mut canvas);
         return match write_png(&path, &canvas) {
             Ok(()) => {
-                println!("wrote {path} ({WIDTH}x{HEIGHT}, view {view})");
+                println!("wrote {path} ({WIDTH}x{HEIGHT}, view {shown})");
                 ExitCode::SUCCESS
             }
             Err(e) => {
@@ -182,6 +199,7 @@ fn main() -> ExitCode {
             view,
             args.demo,
             args.state,
+            args.screensaver,
             &selected_socket_path(args.socket.as_deref()),
         );
     }
@@ -191,10 +209,13 @@ fn main() -> ExitCode {
 }
 
 /// `--bench-head`: what one frame of the head costs, state by state, next to
-/// a whole companion frame. Run it on the CM0 to see the real budget.
+/// a whole companion frame, a screensaver frame and the framebuffer push.
+/// Run it on the CM0 to see the real budget.
 fn bench_head() -> ExitCode {
+    use lapis_ui::backend::fbdev::{blit_rgb565_rows, convert_rgb888_to_rgb565};
     use lapis_ui::gfx::mascot::Mascot;
     use lapis_ui::views::companion::HEAD;
+    use lapis_ui::views::screensaver::{RADIUS, SCREENSAVER_FPS};
     use std::time::Instant;
 
     const FRAMES: usize = 600;
@@ -212,7 +233,10 @@ fn bench_head() -> ExitCode {
     let (cx, cy, r) = HEAD;
     let mut canvas = Canvas::new();
     let mut nanos = [0u64; FRAMES];
-    println!("microseconds per frame over {FRAMES} frames, head radius {r} px");
+    println!(
+        "microseconds per frame over {FRAMES} frames, head radius {r} px \
+         ({RADIUS} px on the screensaver)"
+    );
     for state in MascotState::ALL {
         let mut mascot = Mascot::new();
         mascot.snap(state);
@@ -235,6 +259,44 @@ fn bench_head() -> ExitCode {
         *slot = start.elapsed().as_nanos() as u64;
     }
     report("companion frame", &mut nanos);
+
+    // The screensaver as the loop draws it at SCREENSAVER_FPS: tick, render
+    // (head at radius RADIUS, the time, and the dark theme's ink/paper swap).
+    for (theme, name) in [("paper", "screensaver"), ("dark", "screensaver dark")] {
+        let mut app = App::new();
+        app.on_daemon_message(serde_json::json!({"type": "ui_settings", "theme": theme}));
+        app.start_screensaver();
+        let step = 1.0 / SCREENSAVER_FPS as f64;
+        for (i, slot) in nanos.iter_mut().enumerate() {
+            let start = Instant::now();
+            app.tick(step as f32, i as f64 * step);
+            app.render(&mut canvas);
+            *slot = start.elapsed().as_nanos() as u64;
+        }
+        if !app.screensaver_on() {
+            println!("  (screensaver did not start: uptime under 20 s?)");
+        }
+        report(name, &mut nanos);
+    }
+    // What `--fb` adds to every frame: RGB565 conversion and the copy into
+    // the mapped framebuffer (a plain buffer here; the SPI transfer to the
+    // panel happens in the kernel and is not counted).
+    let mut rgb565 = vec![0u16; (WIDTH * HEIGHT) as usize];
+    let mut fb = vec![0u8; (WIDTH * HEIGHT * 2) as usize];
+    for slot in nanos.iter_mut() {
+        let start = Instant::now();
+        convert_rgb888_to_rgb565(canvas.pixels(), &mut rgb565);
+        blit_rgb565_rows(
+            &rgb565,
+            &mut fb,
+            WIDTH as usize,
+            HEIGHT as usize,
+            WIDTH as usize,
+        );
+        *slot = start.elapsed().as_nanos() as u64;
+        std::hint::black_box(&fb);
+    }
+    report("fb push", &mut nanos);
     ExitCode::SUCCESS
 }
 
@@ -284,7 +346,13 @@ fn send_replies(app: &mut App, ipc: &mut IpcClient) {
 }
 
 #[cfg(feature = "sim")]
-fn run_sim(view: &str, demo: bool, state: Option<MascotState>, socket: &str) -> ExitCode {
+fn run_sim(
+    view: &str,
+    demo: bool,
+    state: Option<MascotState>,
+    screensaver: bool,
+    socket: &str,
+) -> ExitCode {
     use lapis_ui::backend::sdl_sim::SimBackend;
     use std::time::Instant;
 
@@ -299,6 +367,9 @@ fn run_sim(view: &str, demo: bool, state: Option<MascotState>, socket: &str) -> 
     app.open_named(view);
     if let Some(state) = state {
         app.pin_state(state, true);
+    }
+    if screensaver {
+        app.start_screensaver();
     }
     // Always created; inert (demo state stays) until a daemon is listening.
     let mut ipc = IpcClient::new(socket);
@@ -344,7 +415,13 @@ fn run_sim(view: &str, demo: bool, state: Option<MascotState>, socket: &str) -> 
 }
 
 #[cfg(not(feature = "sim"))]
-fn run_sim(_view: &str, _demo: bool, _state: Option<MascotState>, _socket: &str) -> ExitCode {
+fn run_sim(
+    _view: &str,
+    _demo: bool,
+    _state: Option<MascotState>,
+    _screensaver: bool,
+    _socket: &str,
+) -> ExitCode {
     usage_err("built without the `sim` feature; rebuild with default features")
 }
 
@@ -474,6 +551,9 @@ fn run_fb(view: &str, demo: bool, state: Option<MascotState>, socket: &str) -> E
                 // A key on a dark screen only wakes it: never act on (or
                 // approve) something the user could not see.
                 _ if asleep => app.wake(),
+                // `App::key` swallows the key that ends the screensaver.
+                // ponytail: fn+U / fn+I never reach it, so on the screensaver
+                // they still step the brightness as they end it (no view acts).
                 LapisKey::BacklightDown => {
                     level = level.saturating_sub(bl_step).max(bl_step);
                     app.wake();

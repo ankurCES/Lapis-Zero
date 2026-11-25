@@ -182,6 +182,8 @@ data class CreateChatRequest(
     @SerialName("host_id") val hostId: String,
     val title: String? = null,
     @SerialName("policy_override") val policyOverride: String? = null,
+    /** A tool on the host; absent (null) for the device's own agent. */
+    val agent: String? = null,
 )
 
 @Serializable

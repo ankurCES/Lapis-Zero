@@ -12,6 +12,9 @@ import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.ComposeTimeoutException
 import androidx.compose.ui.test.assert
+import androidx.compose.ui.test.assertCountEquals
+import androidx.compose.ui.test.hasAnyDescendant
+import androidx.compose.ui.test.hasClickAction
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertIsOff
@@ -272,6 +275,21 @@ class AppSmokeTest {
         compose.onAllNodesWithText(text, substring = true).fetchSemanticsNodes().isNotEmpty()
     }
 
+    /** Opens a chat from the list through its row's own click: the New session button may lie over it. */
+    private fun openChat(title: String) {
+        compose.onNode(hasClickAction() and hasAnyDescendant(hasText(title)), useUnmergedTree = true).performSemanticsAction(SemanticsActions.OnClick)
+    }
+
+    /**
+     * The chat list with the device's hosts in it (`arch-dev` is known only from the device's
+     * state): the hosts' rows are above the chats, so a chat row moves once they arrive.
+     */
+    private fun waitForChats() {
+        waitFor("arch-dev")
+        waitFor("open settings")
+        compose.waitForIdle()
+    }
+
     /**
      * With the head's contact sheets asked for (`-Plapis.head.sheets=<directory>`), also saves
      * the window as it is now, to see the head where the app puts it. Nothing otherwise.
@@ -295,9 +313,9 @@ class AppSmokeTest {
 
     private fun waitForHead(state: String) = waitUntilOrDump("the agent's head to be $state", 15_000) { heads(state) > 0 }
 
-    /** The chat list is up: its "New chat" button exists (an extended FAB is named by its icon). */
+    /** The chat list is up: its "New session" button exists (an extended FAB is named by its icon). */
     private fun waitForWorkspace() = waitUntilOrDump("the workspace", 15_000) {
-        compose.onAllNodesWithContentDescription("New chat").fetchSemanticsNodes().isNotEmpty()
+        compose.onAllNodesWithContentDescription("New session").fetchSemanticsNodes().isNotEmpty()
     }
 
     private fun waitGone(text: String, timeoutMs: Long = 15_000) = waitUntilOrDump("'$text' to go away", timeoutMs) {
@@ -359,7 +377,7 @@ class AppSmokeTest {
     }
 
     private fun openHosts() {
-        waitFor("open settings")
+        waitForChats()
         tap("Config")
         waitFor("Secrets vault")
         tap("KVM hosts")
@@ -372,8 +390,8 @@ class AppSmokeTest {
         show()
 
         // Chats: list, host filter, active host, running indicator.
-        waitFor("open settings")
-        compose.onNodeWithContentDescription("New chat").assertIsDisplayed()
+        waitForChats()
+        compose.onNodeWithContentDescription("New session").assertIsDisplayed()
         compose.onNodeWithText("All").assertIsDisplayed()
         compose.onNodeWithText("ACTIVE HOST").assertIsDisplayed()
         compose.onNodeWithText("devbox").assertIsDisplayed() // device switcher pill
@@ -381,10 +399,12 @@ class AppSmokeTest {
         snap("chats")
 
         // A chat thread: bubbles, tool card, composer with host and policy badges.
-        tap("open settings")
+        openChat("open settings")
+        waitFor("Ask the agent…")
         waitFor("Mock run complete: 6 scripted steps.")
-        compose.onNodeWithText("click(160, 24) left").assertIsDisplayed()
-        compose.onNodeWithText("VNC").assertIsDisplayed()
+        // Above the answer; in this small window the thread is scrolled down to the answer.
+        compose.onNodeWithText("click(160, 24) left").assertExists()
+        compose.onNodeWithText("VNC").assertExists()
         compose.onNodeWithText("Ask the agent…").assertIsDisplayed()
         compose.onNodeWithText("HOST DEFAULT ▾").assertIsDisplayed()
         compose.onNodeWithContentDescription("Send").assertExists()
@@ -406,11 +426,13 @@ class AppSmokeTest {
         compose.onNodeWithContentDescription("Back").performClick()
         waitForWorkspace()
 
-        // A new chat opens on the agent at rest, larger, over the line that says what to do.
-        compose.onNodeWithContentDescription("New chat").performClick()
-        waitFor("Run on which host?")
-        tap("macbook-pro  (active)")
+        // A new session opens on the agent at rest, larger, over the line that says what to do.
+        // Each host is listed with the agents that can work on it; the first is macbook-pro.
+        waitFor("START A SESSION")
+        tap("Lapis agent")
         waitFor("Describe what the agent should do on macbook-pro.")
+        // It opened as a tab next to the chat opened before.
+        compose.onNodeWithText("open settings").assertExists()
         waitUntilOrDump("the new chat's head, alone", 15_000) { heads("idle") == 1 } // the list's own left with the list
         compose.onNodeWithContentDescription("Lapis agent: idle").assertIsDisplayed()
         snap("thread-new")
@@ -518,7 +540,7 @@ class AppSmokeTest {
     fun `dialogs sheets and secondary surfaces open without crashing in the ink theme`() {
         pairWithMock()
         show(ThemeMode.INK)
-        waitFor("open settings")
+        waitForChats()
 
         // Chat list: row menu, rename dialog, host picker (two hosts are configured).
         compose.onNodeWithContentDescription("Chat actions").performClick()
@@ -526,13 +548,15 @@ class AppSmokeTest {
         tap("Rename")
         waitFor("Rename chat")
         tap("Cancel")
-        compose.onNodeWithContentDescription("New chat").performClick()
-        waitFor("Run on which host?")
-        tap("Cancel")
+        compose.onNodeWithContentDescription("New session").performClick()
+        waitFor("Start a session")
+        // The scrim's own action: a tap in the middle of the window would land on the tall sheet.
+        compose.onNodeWithContentDescription("Close sheet").performSemanticsAction(SemanticsActions.OnClick)
+        waitGone("Start a session")
         tap("arch-dev") // host filter chip
         waitFor("No chats yet")
         tap("All")
-        waitFor("open settings")
+        waitForChats()
 
         // Device switcher.
         tap("devbox")
@@ -545,7 +569,7 @@ class AppSmokeTest {
         waitGone("Paired devices")
 
         // Thread: expand a tool card, open its frame full screen.
-        tap("open settings")
+        openChat("open settings")
         waitFor("click(160, 24) left")
         tap("click(160, 24) left")
         waitFor("Click header")
@@ -630,7 +654,7 @@ class AppSmokeTest {
         vaultDown = true
         pairWithMock()
         show()
-        waitFor("open settings")
+        waitForChats()
         tap("Config")
         waitFor("Secrets vault")
         tap("Agent & LLM")
@@ -664,7 +688,7 @@ class AppSmokeTest {
     fun `approval sheet appears decides and clears when resolved on the device`() {
         pairWithMock()
         show()
-        waitFor("open settings")
+        waitForChats()
 
         // The agent stops at a gate: the sheet pops up over whatever tab is open.
         push(Fixtures.stateSync("WAITING_APPROVAL", chatId, 5, approvals = Fixtures.approval("req_1")))
@@ -706,7 +730,7 @@ class AppSmokeTest {
         assertEquals("http://$host", container.devices.state.value.active?.endpoint?.baseUrl)
         tap("Continue")
         waitForWorkspace()
-        waitFor("open settings")
+        waitForChats()
     }
 
     @Test
@@ -920,16 +944,17 @@ class AppSmokeTest {
         agents = errorResponse(409, "ssh_unavailable", reason)
         pairWithMock()
         show()
-        waitFor("open settings")
-        tap("open settings")
+        waitForChats()
+        openChat("open settings")
+        waitFor("Ask the agent…")
         waitFor("Mock run complete: 6 scripted steps.")
-        compose.onNodeWithText("RUN WITH").assertExists()
+        compose.onNodeWithText("LAPIS AGENT ▾").assertExists()
 
         // SSH does not work for the host yet: the reason, and the Lapis agent as the only choice.
         waitFor(reason)
         compose.onNodeWithText("LAPIS AGENT ▾").performClick()
         waitFor("Look for tools again")
-        compose.onNodeWithText("Lapis agent").assertExists()
+        compose.onAllNodesWithText("Lapis agent").assertCountEquals(2) // the menu's, and the answer's author
         compose.onNodeWithText("Claude Code").assertDoesNotExist()
         // Put right (the device authorised, say) and looked for again: the tools on the host.
         agents = jsonResponse(Fixtures.AGENTS)
@@ -962,9 +987,9 @@ class AppSmokeTest {
         compose.onNodeWithText("CLAUDE ▾").performClick()
         waitFor("Lapis agent")
         compose.onNodeWithText("opencode").assertExists()
-        compose.onNodeWithText("claude").assertExists()
+        compose.onAllNodesWithText("claude").assertCountEquals(2) // the answer's author, and the menu's
         compose.onNodeWithText("Freya").assertDoesNotExist()
-        tap("claude") // the current choice: nothing to change
+        compose.onAllNodesWithText("claude")[1].performClick() // the current choice: nothing to change
         waitGone("Lapis agent")
 
         // While it works, the thread shows the tool and its latest progress line.
@@ -989,10 +1014,11 @@ class AppSmokeTest {
         sshFeatures = false
         pairWithMock()
         show()
-        waitFor("open settings")
+        waitForChats()
 
         // A thread: the menu is there, closed, with the one line that says why.
-        tap("open settings")
+        openChat("open settings")
+        waitFor("Ask the agent…")
         waitFor("Mock run complete: 6 scripted steps.")
         waitFor(ChatRepository.NO_SSH_FEATURES)
         compose.onNodeWithText("LAPIS AGENT ▾").performClick()

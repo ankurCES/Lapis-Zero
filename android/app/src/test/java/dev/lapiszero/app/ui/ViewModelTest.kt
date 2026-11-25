@@ -1352,10 +1352,9 @@ class ViewModelTest {
         router.json("GET", "/v1/chats/$chatId", """{"chat": ${Fixtures.chat(agent = "claude")}, "messages": [], "has_more": false}""")
         sync(Fixtures.stateSync("ACTING", activeChatId = chatId, step = 0))
         val list = ChatListViewModel(repo)
-        assertEquals("claude", list.ui.await { it.rows.isNotEmpty() }.rows.single().agentName)
-        val vm = ChatThreadViewModel(repo, chatId)
-        // Opening the thread fetched the host's tools: the list now knows the name.
+        // The list fetches each host's tools itself, so the tag becomes the tool's name.
         assertEquals("Claude Code", list.ui.await { it.rows.singleOrNull()?.agentName == "Claude Code" }.rows.single().agentName)
+        val vm = ChatThreadViewModel(repo, chatId)
 
         assertNull(vm.ui.await { it.running }.progress)
         source.emit(1, Fixtures.activity(step = 0, kind = "vnc_click", summary = "click(1, 2) left"))

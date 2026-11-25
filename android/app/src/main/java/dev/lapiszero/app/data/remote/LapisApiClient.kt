@@ -120,7 +120,8 @@ class LapisApiClient(
         hostId: String,
         title: String? = null,
         policyOverride: String? = null,
-    ): Chat = send("POST", "v1/chats", CreateChatRequest(hostId, title, policyOverride))
+        agent: String? = null,
+    ): Chat = send("POST", "v1/chats", CreateChatRequest(hostId, title, policyOverride, agent))
 
     suspend fun chat(id: String, before: Long? = null, limit: Int = 50): ChatDetailResponse =
         get(
