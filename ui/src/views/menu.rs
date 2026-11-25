@@ -8,13 +8,14 @@ use crate::gfx::spring::Spring;
 use super::CONTENT_Y;
 
 /// Text row labels; row 1 is a template whose `<host>` is substituted at render.
-const ROWS: [&str; 6] = [
+const ROWS: [&str; 7] = [
     "New Task / Prompt",
     "Target Host: <host>",
     "Pause / Resume Agent",
     "Run Saved Workflow...",
     "Scheduled Jobs",
     "Network, Tailscale & Power",
+    "Pair Android App",
 ];
 
 pub struct MenuView {
@@ -98,6 +99,36 @@ pub fn render(canvas: &mut Canvas, m: &MenuView) {
                 draw_text(canvas, PAD_X, y, s, Font::F6x8, color);
             }
             _ => draw_text(canvas, PAD_X, y, ROWS[i], Font::F6x8, color),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::gfx::canvas::HEIGHT;
+
+    #[test]
+    fn all_rows_fit_below_the_status_bar_without_overlap() {
+        assert_eq!(ROWS.len(), 7);
+        assert_eq!(ROWS[6], "Pair Android App");
+        // Rows are taller than the 6x8 glyphs, and the last pill ends on screen.
+        assert!(ROW_H > Font::F6x8.cell_size().1);
+        let last_pill_bottom = LIST_Y - 1 + ROWS.len() as i32 * ROW_H;
+        assert!(LIST_Y > CONTENT_Y && last_pill_bottom <= HEIGHT);
+
+        // Rendered: the pill of the last row is ink, and nothing but paper
+        // lies below it.
+        let mut m = MenuView::demo();
+        m.move_sel(-1);
+        assert_eq!(m.index, 6);
+        let mut c = Canvas::new();
+        render(&mut c, &m);
+        let y = LIST_Y + 6 * ROW_H;
+        assert_eq!(c.get_pixel(4, y), Some(INK));
+        assert_eq!(c.get_pixel(4, last_pill_bottom - 1), Some(INK));
+        for yy in last_pill_bottom..HEIGHT {
+            assert_eq!(c.get_pixel(4, yy), Some(PAPER));
         }
     }
 }

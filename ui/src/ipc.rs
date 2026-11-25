@@ -2,7 +2,8 @@
 //!
 //! `lapis-ui` never blocks its render loop on socket I/O. Connection attempts are
 //! rate-limited with exponential backoff (`200ms..=2000ms`), reads drain whatever
-//! bytes are currently buffered in the kernel, and disconnects reset cleanly.
+//! bytes are currently buffered in the kernel, writes queue what the kernel will
+//! not take yet, and disconnects reset cleanly.
 
 use std::io::{ErrorKind, Read, Write};
 use std::os::unix::net::UnixStream;
@@ -50,6 +51,13 @@ pub struct DaemonState {
     pub tailscale_ip: String,
     pub tailscale_auth_url: Option<String>,
     pub api_key_ready: bool,
+    /// `state_sync.action`: the activity kind of the step being executed
+    /// right now (`screenshot`, `vnc_click`, `ssh_exec`, ...), `Some("")`
+    /// when no step is, and `None` when the daemon does not say (one from
+    /// before the field existed). Unlike the fields above this is never
+    /// carried over from an earlier frame: see [`DaemonState::apply_state_sync`].
+    #[serde(skip)]
+    pub action: Option<String>,
 }
 
 impl Default for DaemonState {
@@ -66,6 +74,7 @@ impl Default for DaemonState {
             tailscale_ip: "100.91.12.4".to_string(),
             tailscale_auth_url: None,
             api_key_ready: true,
+            action: None,
         }
     }
 }
@@ -75,6 +84,12 @@ impl DaemonState {
     ///
     /// Present keys overwrite, missing keys keep their current value, and a
     /// malformed payload (wrong field type) leaves `self` untouched.
+    ///
+    /// `action` is the exception: each frame speaks for itself. A frame
+    /// without it (or with something that is not a string there) comes from a
+    /// daemon that does not report the running step, and says so by leaving
+    /// `action` at `None`, whatever an earlier frame carried. It is read
+    /// leniently so that an odd value cannot void the rest of the sync.
     pub fn apply_state_sync(&mut self, value: &Value) {
         let (Ok(Value::Object(mut cur)), Some(obj)) =
             (serde_json::to_value(&*self), value.as_object())
@@ -86,8 +101,22 @@ impl DaemonState {
         }
         if let Ok(next) = serde_json::from_value(Value::Object(cur)) {
             *self = next;
+            self.action = obj
+                .get("action")
+                .and_then(Value::as_str)
+                .map(str::to_string);
         }
     }
+}
+
+/// The `status` of a `task_finished` frame (`done`, `failed`, `stopped` or
+/// `cancelled`; passed on as sent, so the caller decides what an unknown one
+/// means). `None` for any other frame, and for one without a string status.
+pub fn task_finished_status(frame: &Value) -> Option<&str> {
+    if frame["type"].as_str() != Some("task_finished") {
+        return None;
+    }
+    frame["status"].as_str()
 }
 
 /// Resolves the socket path: an explicit `--socket` value or the OS default.
@@ -158,11 +187,34 @@ pub fn msg_ptt_audio(state: &str) -> Value {
     })
 }
 
+/// Builds `{"type":"pairing_control","command":...}` (SPEC 6.3).
+///
+/// Allowed `command` values: `"start"`, `"stop"`.
+pub fn msg_pairing_control(command: &str) -> Value {
+    json!({
+        "type": "pairing_control",
+        "command": command,
+    })
+}
+
+/// Builds `{"type":"screen_snapshot","id":...,"png_b64":...}` (SPEC 6.3), the
+/// reply to a daemon `screen_request` with the same `id`.
+pub fn msg_screen_snapshot(id: &str, png_b64: &str) -> Value {
+    json!({
+        "type": "screen_snapshot",
+        "id": id,
+        "png_b64": png_b64,
+    })
+}
+
 /// Non-blocking Unix socket client speaking NDJSON with exponential reconnect backoff.
 pub struct IpcClient {
     path: PathBuf,
     stream: Option<UnixStream>,
     buf: Vec<u8>,
+    /// Outgoing bytes the kernel has not accepted yet (a `screen_snapshot` line
+    /// can exceed the socket buffer, 8 kB on macOS); flushed by `send` and `poll`.
+    out: Vec<u8>,
     backoff: f32,
     last_attempt: Option<f32>,
 }
@@ -174,12 +226,20 @@ impl IpcClient {
             path: path.into(),
             stream: None,
             buf: Vec::new(),
+            out: Vec::new(),
             backoff: MIN_BACKOFF_SECS,
             last_attempt: None,
         }
     }
 
     /// Returns `true` if a socket connection is currently open.
+    /// The socket's file descriptor while connected (for `poll(2)` in the fb loop).
+    #[cfg(unix)]
+    pub fn raw_fd(&self) -> Option<std::os::fd::RawFd> {
+        use std::os::fd::AsRawFd;
+        self.stream.as_ref().map(|s| s.as_raw_fd())
+    }
+
     pub fn is_connected(&self) -> bool {
         self.stream.is_some()
     }
@@ -216,6 +276,7 @@ impl IpcClient {
                 }
                 self.stream = Some(stream);
                 self.buf.clear();
+                self.out.clear();
                 self.backoff = MIN_BACKOFF_SECS;
                 self.last_attempt = None;
                 if let Err(e) = self.send(&msg_request_sync()) {
@@ -238,6 +299,12 @@ impl IpcClient {
     where
         F: FnMut(Value),
     {
+        // Push out whatever an earlier `send` could not hand to the kernel.
+        if self.flush().is_err() {
+            self.backoff = MIN_BACKOFF_SECS;
+            self.last_attempt = Some(now);
+            return;
+        }
         let mut disconnected = false;
         if let Some(stream) = self.stream.as_mut() {
             let mut tmp = [0u8; 4096];
@@ -287,8 +354,7 @@ impl IpcClient {
         }
 
         if disconnected {
-            self.stream = None;
-            self.buf.clear();
+            self.drop_stream();
             self.backoff = MIN_BACKOFF_SECS;
             self.last_attempt = Some(now);
         }
@@ -296,21 +362,55 @@ impl IpcClient {
 
     /// Serializes `value` as a single NDJSON line and writes it to the socket.
     ///
-    /// Returns `Ok(())` when disconnected (best-effort UI transport). On write
-    /// failure, drops the stream and clears the read buffer.
+    /// Never blocks: bytes the socket does not take right now stay queued and go
+    /// out on later `send`/`poll` calls, in order. Returns `Ok(())` when
+    /// disconnected (best-effort UI transport). On write failure, or if the
+    /// daemon stops reading and the queue outgrows its cap, drops the stream.
     pub fn send(&mut self, value: &Value) -> Result<(), String> {
-        let Some(stream) = self.stream.as_mut() else {
+        if self.stream.is_none() {
             return Ok(());
-        };
+        }
         let mut line = serde_json::to_vec(value)
             .map_err(|e| format!("failed to serialize ipc message: {e}"))?;
         line.push(b'\n');
-        if let Err(e) = stream.write_all(&line) {
-            self.stream = None;
-            self.buf.clear();
-            return Err(format!("ipc write failed: {e}"));
+        if self.out.len() + line.len() > MAX_BUF_BYTES {
+            self.drop_stream();
+            return Err("ipc write failed: daemon is not reading".to_string());
         }
-        Ok(())
+        self.out.extend_from_slice(&line);
+        self.flush()
+    }
+
+    /// Writes as much of the outgoing queue as the socket accepts without blocking.
+    fn flush(&mut self) -> Result<(), String> {
+        let Some(stream) = self.stream.as_mut() else {
+            return Ok(());
+        };
+        let mut sent = 0;
+        let result = loop {
+            if sent == self.out.len() {
+                break Ok(());
+            }
+            match stream.write(&self.out[sent..]) {
+                Ok(0) => break Err("ipc write failed: socket closed".to_string()),
+                Ok(n) => sent += n,
+                Err(ref e) if e.kind() == ErrorKind::WouldBlock => break Ok(()),
+                Err(ref e) if e.kind() == ErrorKind::Interrupted => continue,
+                Err(e) => break Err(format!("ipc write failed: {e}")),
+            }
+        };
+        self.out.drain(..sent);
+        if result.is_err() {
+            self.drop_stream();
+        }
+        result
+    }
+
+    /// Forgets the connection and everything buffered for it.
+    fn drop_stream(&mut self) {
+        self.stream = None;
+        self.buf.clear();
+        self.out.clear();
     }
 
     fn record_failed_attempt(&mut self, now: f32) {
@@ -418,6 +518,113 @@ mod tests {
     }
 
     #[test]
+    fn state_sync_action_is_read_frame_by_frame() {
+        let sync = |extra: Value| {
+            let mut frame = json!({"type": "state_sync", "agent_state": "ACTING"});
+            for (k, v) in extra.as_object().unwrap() {
+                frame[k] = v.clone();
+            }
+            frame
+        };
+        let mut ds = DaemonState::default();
+        assert_eq!(ds.action, None, "nothing is known before the first sync");
+
+        // Every kind the daemon names, and the empty string for "no step".
+        for kind in [
+            "screenshot",
+            "vnc_click",
+            "vnc_move",
+            "vnc_drag",
+            "vnc_scroll",
+            "type_text",
+            "vnc_key",
+            "ssh_exec",
+            "agent_run",
+            "wait",
+            "a_kind_from_the_future",
+            "",
+        ] {
+            ds.apply_state_sync(&sync(json!({"action": kind})));
+            assert_eq!(ds.action.as_deref(), Some(kind));
+        }
+
+        // A frame without the field is a daemon that does not report steps:
+        // nothing is carried over from the frame before, while the fields
+        // that are merged keep their values.
+        ds.apply_state_sync(&sync(
+            json!({"action": "ssh_exec", "wifi_ssid": "HomeWiFi"}),
+        ));
+        ds.apply_state_sync(&json!({"type": "state_sync", "agent_state": "THINKING"}));
+        assert_eq!(ds.action, None);
+        assert_eq!(
+            (ds.agent_state.as_str(), ds.wifi_ssid.as_str()),
+            ("THINKING", "HomeWiFi")
+        );
+
+        // Not a string: read as "not reported", and the rest of the frame still counts.
+        for odd in [
+            json!(null),
+            json!(7),
+            json!(["ssh_exec"]),
+            json!({"kind": "wait"}),
+        ] {
+            ds.apply_state_sync(&sync(json!({"action": "wait"})));
+            ds.apply_state_sync(&sync(json!({"action": odd, "next_cron": "09:00 Sweep"})));
+            assert_eq!(ds.action, None, "{odd}");
+            assert_eq!(ds.next_cron, "09:00 Sweep");
+            ds.next_cron.clear();
+        }
+
+        // A frame that is malformed elsewhere changes nothing, `action` included.
+        ds.apply_state_sync(&sync(json!({"action": "vnc_key"})));
+        ds.apply_state_sync(&sync(json!({"action": "wait", "hosts": "oops"})));
+        assert_eq!(ds.action.as_deref(), Some("vnc_key"));
+        ds.apply_state_sync(&json!("not an object"));
+        assert_eq!(ds.action.as_deref(), Some("vnc_key"));
+
+        // The field is this side's reading of a frame, not part of the state
+        // that is merged: it never leaks into the next merge.
+        let echoed = serde_json::to_value(&ds).unwrap();
+        assert!(echoed.get("action").is_none());
+        // The full frame of SPEC 6.1 with the field added.
+        ds.apply_state_sync(&json!({
+            "type": "state_sync", "agent_state": "ACTING", "action": "screenshot",
+            "active_host": "arch-dev", "hosts": ["arch-dev"],
+            "active_task": {"id": "t_01", "title": "T", "step": 4, "max_steps": 25},
+            "next_cron": "", "wifi_ssid": "HomeWiFi", "local_ip": "192.168.1.42",
+            "tailscale_state": "connected", "tailscale_ip": "100.91.12.4",
+            "tailscale_auth_url": null, "api_key_ready": true,
+        }));
+        assert_eq!(ds.action.as_deref(), Some("screenshot"));
+        assert_eq!(ds.active_task.as_ref().map(|t| t.step), Some(4));
+    }
+
+    #[test]
+    fn task_finished_status_is_read_only_from_its_own_frame() {
+        for status in ["done", "failed", "stopped", "cancelled", "something_new"] {
+            let frame = json!({
+                "type": "task_finished", "task_id": "t_01", "chat_id": null,
+                "host": "macbook-pro", "status": status, "summary": "Done.",
+            });
+            assert_eq!(task_finished_status(&frame), Some(status));
+        }
+        // No status, or one that is not a string: nothing to go on.
+        assert_eq!(
+            task_finished_status(&json!({"type": "task_finished"})),
+            None
+        );
+        for odd in [json!(null), json!(1), json!(["done"])] {
+            let frame = json!({"type": "task_finished", "status": odd});
+            assert_eq!(task_finished_status(&frame), None);
+        }
+        // Other frames have a `status` of their own that means something else.
+        let event = json!({"type": "activity_event", "kind": "vnc_click", "status": "done"});
+        assert_eq!(task_finished_status(&event), None);
+        assert_eq!(task_finished_status(&json!({"status": "done"})), None);
+        assert_eq!(task_finished_status(&json!("task_finished")), None);
+    }
+
+    #[test]
     fn outbound_messages_serialize_cleanly() {
         let submit = msg_submit_task("macbook-pro", "Open terminal and check disk usage");
         let parsed: Value = serde_json::from_str(&submit.to_string()).unwrap();
@@ -447,6 +654,15 @@ mod tests {
         let ptt = msg_ptt_audio("start");
         assert_eq!(ptt["type"], "ptt_audio");
         assert_eq!(ptt["state"], "start");
+
+        assert_eq!(
+            msg_pairing_control("start"),
+            json!({"type": "pairing_control", "command": "start"})
+        );
+        assert_eq!(
+            msg_screen_snapshot("a1b2c3d4", "iVBORw0KGgo="),
+            json!({"type": "screen_snapshot", "id": "a1b2c3d4", "png_b64": "iVBORw0KGgo="})
+        );
     }
 
     #[test]
@@ -544,6 +760,69 @@ mod tests {
         assert!(!client.is_connected());
         assert_eq!(client.test_state(), (false, 0.2, Some(2.0)));
 
+        drop(listener);
+        let _ = std::fs::remove_file(&sock_path);
+    }
+
+    #[test]
+    fn oversized_frame_is_queued_not_dropped() {
+        let sock_path =
+            std::env::temp_dir().join(format!("lapis_ui_ipc_big_{}.sock", std::process::id()));
+        let _ = std::fs::remove_file(&sock_path);
+        let listener = UnixListener::bind(&sock_path).expect("bind unix socket");
+
+        let mut client = IpcClient::new(&sock_path);
+        client.connect_ready(1.0).expect("connect_ready ok");
+        let (mut server, _) = listener.accept().expect("accept client");
+        server.set_nonblocking(true).unwrap();
+
+        // Larger than any default socket buffer, and nobody is reading yet: the
+        // old `write_all` hit WouldBlock here and tore the connection down.
+        let big = msg_screen_snapshot("big", &"A".repeat(600_000));
+        client.send(&big).expect("queued, not failed");
+        assert!(client.is_connected());
+        assert!(!client.out.is_empty(), "the tail must wait in the queue");
+        // A frame sent behind it keeps its place in line.
+        client.send(&msg_pairing_control("stop")).expect("queued");
+
+        let mut got = Vec::new();
+        let mut chunk = [0u8; 65536];
+        for _ in 0..20_000 {
+            client.poll(1.5, |_| {});
+            match server.read(&mut chunk) {
+                Ok(n) => got.extend_from_slice(&chunk[..n]),
+                Err(ref e) if e.kind() == ErrorKind::WouldBlock => {
+                    std::thread::sleep(std::time::Duration::from_micros(200));
+                }
+                Err(e) => panic!("server read failed: {e}"),
+            }
+            if got.iter().filter(|&&b| b == b'\n').count() == 3 {
+                break;
+            }
+        }
+        assert!(client.is_connected());
+        assert!(client.out.is_empty());
+        let lines: Vec<Value> = got
+            .split(|&b| b == b'\n')
+            .filter(|l| !l.is_empty())
+            .map(|l| serde_json::from_slice(l).expect("whole NDJSON line"))
+            .collect();
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0]["type"], "request_sync");
+        assert_eq!(lines[1], big);
+        assert_eq!(lines[2], msg_pairing_control("stop"));
+
+        // A daemon that never reads cannot grow the queue without bound.
+        let mut overflowed = false;
+        for _ in 0..8 {
+            if client.send(&big).is_err() {
+                overflowed = true;
+                break;
+            }
+        }
+        assert!(overflowed && !client.is_connected());
+
+        drop(server);
         drop(listener);
         let _ = std::fs::remove_file(&sock_path);
     }

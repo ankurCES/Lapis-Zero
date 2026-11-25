@@ -1,8 +1,53 @@
+# Lapis-Zero: files that never belong in the repository.
+# The Android project has its own rules in android/.gitignore.
+
+# --- Operating system and editors
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# --- Rust (ui/)
 target/
+
+# --- Python (daemon/)
 .venv/
 __pycache__/
 *.pyc
-.DS_Store
+.pytest_cache/
+.ruff_cache/
 /dist/
+
+# --- Firmware image build (os/)
+os/build/
+os/deploy/
+# The cross-compiled lapis-ui staged for the image by the build script.
+os/stage-lapis/02-lapis-stack/files/
+
+# --- Scratch output
+# `make dump-frames`, simulator renders, mock-daemon state.
 dumps/
+
+# --- Secrets and machine-specific settings
+# Real keys and passwords live on the device, never here. The examples in
+# config/ (secrets.example.env and friends) are the only ones that are tracked.
+.env
+secrets.env
+*.pem
+*.jks
+*.keystore
+local.properties
+
+# --- Local tool data
+# Per-machine state of development tools and AI coding assistants: settings,
+# session data, edit receipts, issue-tracker databases. They contain local
+# paths and are not source.
+.claude/
+.cursor/
+.codex/
+.opencode/
+.gemini/
+.aider*
 .freya/
+.beads/

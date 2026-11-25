@@ -36,6 +36,8 @@ pub enum LapisKey {
     BacklightDown,
     /// `fn + I`: increase LCD backlight brightness (SPEC 5.4).
     BacklightUp,
+    /// Push-to-talk edge: `true` = pressed, `false` = released (`fn/OPT + SPACE`).
+    PushToTalk(bool),
 }
 
 /// Something that can show a finished frame.

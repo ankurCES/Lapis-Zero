@@ -6,10 +6,11 @@
 #   lapis-firstboot.service installs it automatically on first boot.
 #
 # Security:
-#   Do NOT put VNC passwords or SSH private keys in this file.
-#   Store VNC passwords in /etc/lapis/secrets.env (chmod 600) and reference
-#   them by environment variable name, and place SSH private keys in
-#   /etc/lapis/ (chmod 600).
+#   Do NOT put VNC or login passwords or SSH private keys in this file.
+#   Store passwords in /etc/lapis/secrets.env (chmod 600) and reference them
+#   by environment variable name (`password_env` is always such a NAME: a
+#   value that is not one is refused, and ignored when found in this file),
+#   and place SSH private keys in /etc/lapis/ (chmod 600).
 
 # ---------------------------------------------------------------------------
 # Host 1: macOS laptop reachable over Tailscale
@@ -21,6 +22,9 @@ hostname = "macbook-pro"
 # Target machine's Tailscale IPv4 address (100.64.0.0/10 CGNAT range).
 # Bind the host's VNC server strictly to this Tailscale interface.
 tailscale_ip = "100.64.10.21"
+
+# Target operating system: "macos" | "linux" | "windows" (tells the agent what it is driving).
+os = "macos"
 
 # Safety policy tier for actions targeting this host:
 #   "strict"     — every mutating VNC/SSH action requires on-device UI approval
@@ -49,6 +53,13 @@ user = "alice"
 # Omit if authenticating via Tailscale SSH.
 # identity_file = "/etc/lapis/lapis_ed25519"
 
+# Optional: environment variable name in /etc/lapis/secrets.env holding the account's
+# login password. The device logs in with identity_file, then with its own key (shown
+# by the app, which can also add it to this host), and only then, and only if this is
+# set, with the password. On a Mac the Screen Sharing and Remote Login accounts are
+# the same, so this is usually the name used for vnc.password_env above.
+# password_env = "LAPIS_VNC_PASSWORD_macbook_pro"
+
 # ---------------------------------------------------------------------------
 # Host 2: Linux developer workstation reachable over Tailscale
 # ---------------------------------------------------------------------------
@@ -58,6 +69,7 @@ hostname = "arch-dev"
 
 # Target machine's Tailscale IPv4 address (100.64.0.0/10 CGNAT range).
 tailscale_ip = "100.64.20.42"
+os = "linux"
 
 # Safety policy tier: "strict" | "balanced" | "autonomous".
 policy = "strict"
@@ -81,3 +93,6 @@ user = "dev"
 
 # Optional SSH private key path (chmod 600 inside /etc/lapis/).
 identity_file = "/etc/lapis/lapis_ed25519"
+
+# Optional login password, by the name of its secret (see macbook-pro above).
+# password_env = "LAPIS_SSH_PASSWORD_arch_dev"

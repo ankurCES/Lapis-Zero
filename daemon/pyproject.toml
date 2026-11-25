@@ -4,23 +4,41 @@ build-backend = "hatchling.build"
 
 [project]
 name = "lapis-daemon"
-version = "0.1.0"
+version = "0.3.1"
 description = "Lapis-Zero OS autonomous Option C KVM agent daemon"
 requires-python = ">=3.12"
 dependencies = [
     "pydantic>=2.9",
     "pillow>=10",
+    "aiohttp>=3.10",
+    "cryptography>=42",
+    "tomli-w>=1.0",
 ]
 
 [project.optional-dependencies]
+# Live Option C drivers (lazily imported; not needed for --mock). The LLM
+# adapters use aiohttp directly: the anthropic SDK costs 35-50 MB RSS on the CM0.
 kvm = [
-    "asyncvnc>=1.0",
+    # Pinned: vnc_driver reads frames through asyncvnc internals to work around
+    # its swapped Bell/ServerCutText message types (see VncDriver._read_frame).
+    "asyncvnc==1.3.0",
     "asyncssh>=2.15",
-    "anthropic>=0.34",
+]
+# BlueZ D-Bus GATT provisioning (Linux only, on-demand service).
+ble = [
+    # Pinned: ble_prov builds on 0.1.7 internals (Adapter(proxy), the Includes
+    # override); 0.2 moves them and switches to dbus_fast.
+    "bluez-peripheral==0.1.7",
+    "dbus-next==0.2.3",
+]
+# Everything the CardputerZero image installs.
+device = [
+    "lapis-daemon[kvm,ble]",
 ]
 
 [project.scripts]
 lapis-daemon = "lapis_daemon.main:main"
+lapis-ble-prov = "lapis_daemon.ble_prov.service:main"
 
 [dependency-groups]
 dev = [

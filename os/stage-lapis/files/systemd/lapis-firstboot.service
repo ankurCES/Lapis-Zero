@@ -1,13 +1,14 @@
 [Unit]
 Description=Lapis-Zero first-boot seed importer
-Requires=local-fs.target
-After=local-fs.target network-online.target
-Before=lapis-daemon.service lapis-ui.service
+After=local-fs.target
+RequiresMountsFor=/boot/firmware
+Before=NetworkManager.service lapis-daemon.service lapis-tailscale-up.service
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
 ExecStart=/usr/lib/lapis/lapis-firstboot.sh
+TimeoutStartSec=60
 StandardOutput=journal
 StandardError=journal
 

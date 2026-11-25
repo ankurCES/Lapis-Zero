@@ -4,8 +4,25 @@
 //!   v += a * dt
 //!   x += v * dt
 //!
-//! All UI motion (view slides, menu pill, modal pop-in) shares this struct so a
-//! settled spring is reported consistently by the adaptive frame governor.
+//! All UI motion (view slides, menu pill, modal pop-in, the head's easing)
+//! shares this struct so a settled spring is reported consistently by the
+//! adaptive frame governor.
+//!
+//! The frame governor is also why a tick is not one integration step. The
+//! scheme above only settles while `k * dt^2 + 2 * d * dt < 4`, which for the
+//! springs in this UI means a step under 53 to 77 ms; past that every step
+//! throws the value further out. Frames are 16.7 ms apart only while
+//! something is known to be moving: otherwise they come every 83 ms (12 FPS)
+//! or slower, and the loops hand over up to 100 ms after a stall. So
+//! [`Spring::tick`] takes the time it is given in steps of [`MAX_STEP`].
+
+/// The longest single integration step: a 60 FPS frame, so a spring stepped
+/// at 60 FPS moves exactly as one step per frame would move it.
+const MAX_STEP: f32 = 1.0 / 60.0;
+/// The most time one tick advances: what the live loops cap a frame's time
+/// at. After a stall, or between idle frames a second apart, motion picks up
+/// where it was instead of having happened unseen.
+const MAX_TICK: f32 = 0.1;
 
 /// One scalar damped spring.
 #[derive(Clone, Copy, Debug)]
@@ -62,11 +79,21 @@ impl Spring {
         self.x = x;
     }
 
-    /// Advances physics by `dt` seconds using semi-implicit Euler.
+    /// Advances physics by `dt` seconds (at most [`MAX_TICK`]), in steps the
+    /// integrator is stable at whatever the frame rate. A `dt` that is zero,
+    /// negative or not a number advances nothing.
     pub fn tick(&mut self, dt: f32) {
-        let a = self.k * (self.target - self.x) - self.d * self.v;
-        self.v += a * dt;
-        self.x += self.v * dt;
+        if dt.is_nan() {
+            return;
+        }
+        let mut left = dt.min(MAX_TICK);
+        while left > 0.0 {
+            let h = left.min(MAX_STEP);
+            let a = self.k * (self.target - self.x) - self.d * self.v;
+            self.v += a * h;
+            self.x += self.v * h;
+            left -= h;
+        }
     }
 
     /// Current position.
@@ -147,6 +174,73 @@ mod tests {
             let s = Spring::new(k, d, 0.0);
             assert_eq!(s.k, k);
             assert_eq!(s.d, d);
+        }
+    }
+
+    #[test]
+    fn slow_frames_settle_like_fast_ones() {
+        // The governor steps a spring at 60 FPS only while it knows of
+        // motion; a spring can just as well be ticked every 83 ms (12 FPS),
+        // every 100 ms (the loops' cap on a frame's time) or raggedly. One
+        // integration step that long would diverge for every spring here.
+        let ragged = [0.0853, 0.001, 0.1, 1.0 / 60.0, 0.25, 0.004, 0.0633];
+        for (k, d) in [
+            (240.0f32, 24.0f32),
+            (320.0, 26.0),
+            (360.0, 28.0),
+            (180.0, 19.0),
+        ] {
+            // The scheme's own limit for this spring (see the module docs).
+            let limit = (-2.0 * d + (4.0 * d * d + 16.0 * k).sqrt()) / (2.0 * k);
+            assert!(limit < 1.0 / 12.0 && MAX_STEP < limit / 3.0, "k {k}");
+            for dt in [1.0 / 60.0, 1.0 / 12.0, 0.1, 1.0, f32::INFINITY, 0.0] {
+                let mut s = Spring::new(k, d, 0.0);
+                s.set_position(100.0);
+                let (mut far, mut clock) = (0.0f32, 0.0f32);
+                for i in 0..1200 {
+                    // `0.0` stands for the ragged sequence.
+                    let step = if dt == 0.0 {
+                        ragged[i % ragged.len()]
+                    } else {
+                        dt
+                    };
+                    s.tick(step);
+                    clock += step.min(MAX_TICK);
+                    assert!(s.value().is_finite() && s.velocity().is_finite());
+                    far = far.max(-s.value());
+                    // A second and a half of spring time is enough to arrive ...
+                    if clock > 1.5 {
+                        // ... and what has settled stays settled.
+                        assert!(s.settled(), "k {k} dt {dt}: {} at {clock} s", s.value());
+                    }
+                }
+                assert!(far < 12.0, "k {k} dt {dt}: overshot by {far}%");
+            }
+        }
+        // 60 FPS frames are still one step each: the same motion as ever.
+        let (mut a, mut b) = (Spring::slide(), Spring::slide());
+        a.set_position(320.0);
+        b.set_position(320.0);
+        for _ in 0..40 {
+            let h = 1.0 / 60.0;
+            a.tick(h);
+            let acc = b.k * (b.target - b.x) - b.d * b.v;
+            b.v += acc * h;
+            b.x += b.v * h;
+            assert_eq!((a.x, a.v), (b.x, b.v));
+        }
+        // A slower frame lands where the 60 FPS frames it spans would have.
+        let mut c = Spring::slide();
+        c.set_position(320.0);
+        for _ in 0..8 {
+            c.tick(5.0 / 60.0);
+        }
+        assert!((c.x - a.x).abs() < 0.01, "{} against {}", c.x, a.x);
+        // No time, negative time and nonsense advance nothing.
+        let before = (a.x, a.v);
+        for dt in [0.0, -1.0, f32::NAN, f32::NEG_INFINITY] {
+            a.tick(dt);
+            assert_eq!((a.x, a.v), before, "dt {dt}");
         }
     }
 

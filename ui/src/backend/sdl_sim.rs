@@ -4,7 +4,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use sdl2::event::Event;
-use sdl2::keyboard::Keycode;
+use sdl2::keyboard::{Keycode, Mod};
 use sdl2::pixels::PixelFormatEnum;
 use sdl2::rect::Rect;
 use sdl2::render::{Texture, WindowCanvas};
@@ -111,6 +111,10 @@ impl DisplayBackend for SimBackend {
 impl InputBackend for SimBackend {
     fn poll_event(&mut self) -> Option<LapisKey> {
         for event in self.events.poll_iter() {
+            let mods = match &event {
+                Event::KeyDown { keymod, .. } | Event::KeyUp { keymod, .. } => *keymod,
+                _ => Mod::NOMOD,
+            };
             match event {
                 Event::Quit { .. } => self.quit = true,
                 Event::KeyDown {
@@ -134,6 +138,19 @@ impl InputBackend for SimBackend {
                     }
                 }
                 Event::KeyDown {
+                    keycode: Some(Keycode::SPACE),
+                    repeat,
+                    ..
+                } if is_option(mods) && !repeat => {
+                    return Some(LapisKey::PushToTalk(true));
+                }
+                Event::KeyUp {
+                    keycode: Some(Keycode::SPACE),
+                    ..
+                } if is_option(mods) => {
+                    return Some(LapisKey::PushToTalk(false));
+                }
+                Event::KeyDown {
                     keycode: Some(k), ..
                 } => {
                     if let Some(key) = map_key(k) {
@@ -147,13 +164,21 @@ impl InputBackend for SimBackend {
     }
 }
 
+/// True when the `OPT` (left/right GUI) chord modifier is held — the macOS
+/// stand-in for the CardputerZero `fn` key (SPEC 5.3 PTT is `fn + SPACE`).
+fn is_option(mods: Mod) -> bool {
+    mods.intersects(Mod::LGUIMOD | Mod::RGUIMOD)
+}
+
 /// Maps a desktop keycode to a CardputerZero semantic key (SPEC 5.4).
 fn map_key(k: Keycode) -> Option<LapisKey> {
     Some(match k {
-        Keycode::Z | Keycode::LEFT => LapisKey::CycleL,
-        Keycode::C | Keycode::RIGHT => LapisKey::CycleR,
-        Keycode::F | Keycode::UP => LapisKey::Up,
-        Keycode::X | Keycode::DOWN => LapisKey::Down,
+        // Z/C/F/X arrive as chars; `App::key` maps them to navigation outside Prompt.
+        Keycode::LEFT => LapisKey::CycleL,
+        Keycode::RIGHT => LapisKey::CycleR,
+        Keycode::UP => LapisKey::Up,
+        Keycode::DOWN => LapisKey::Down,
+        Keycode::BACKSPACE => LapisKey::Char('\x08'),
         Keycode::RETURN => LapisKey::Enter,
         Keycode::ESCAPE => LapisKey::Esc,
         Keycode::TAB => LapisKey::Tab,

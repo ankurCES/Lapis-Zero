@@ -4,22 +4,20 @@
 # /boot/firmware/lapis-seed/tailscale.authkey) or interactively via View 6.
 
 install -d -m 0755 "${ROOTFS_DIR}/usr/share/keyrings"
-
-# Tailscale GPG key + apt source (Debian Trixie = tuxedo-ish "bookworm" suite,
-# which is what Tailscale's docs pin for current Debian stable/trixie).
-if ! [ -f "${ROOTFS_DIR}/usr/share/keyrings/tailscale-archive-keyring.gpg" ]; then
-    curl -fsSL https://pkgs.tailscale.com/stable/debian/bookworm.noarmor.gpg \
-        -o "${ROOTFS_DIR}/usr/share/keyrings/tailscale-archive-keyring.gpg"
-else
-    echo "tailscale keyring already present"
-fi
+install -d -m 0755 "${ROOTFS_DIR}/etc/apt/sources.list.d"
 
 cat > "${ROOTFS_DIR}/etc/apt/sources.list.d/tailscale.list" <<EOF
 deb [signed-by=/usr/share/keyrings/tailscale-archive-keyring.gpg] https://pkgs.tailscale.com/stable/debian bookworm main
 EOF
 
+# Fetch the keyring and install tailscale inside the chroot so it uses the
+# container's network + pi-gen apt proxy (host-side curl would bypass both).
 on_chroot << 'CHROOT'
 set -e
+if ! [ -f /usr/share/keyrings/tailscale-archive-keyring.gpg ]; then
+    curl -fsSL https://pkgs.tailscale.com/stable/debian/bookworm.noarmor.gpg \
+        -o /usr/share/keyrings/tailscale-archive-keyring.gpg
+fi
 apt-get update
 apt-get install -y --no-install-recommends tailscale
 # tailscaled is socket-activated; do NOT enable anything here.

@@ -8,30 +8,37 @@ use crate::gfx::spring::Spring;
 
 use super::RULE_Y;
 
-/// Action kinds for the modal badge (SPEC 6.1).
+/// Action kinds for the modal badge (SPEC 6.1, 6.3).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ActionKind {
     VncClick,
     VncType,
+    VncKey,
     SshExec,
+    /// An action this build does not know: never mislabel it as a known one.
+    Other,
 }
 
 impl ActionKind {
-    /// Parses a SPEC 6.1 `approval_request.action` string.
+    /// Parses an `approval_request.action` string (SPEC 6.3).
     pub fn from_action(action: &str) -> Self {
         match action {
             "vnc_click" => ActionKind::VncClick,
             "vnc_type" => ActionKind::VncType,
+            "vnc_key" => ActionKind::VncKey,
             "ssh_exec" => ActionKind::SshExec,
-            _ => ActionKind::SshExec,
+            _ => ActionKind::Other,
         }
     }
 
-    fn label(self) -> &'static str {
+    /// Badge text.
+    pub fn label(self) -> &'static str {
         match self {
             ActionKind::VncClick => "VNC CLICK",
             ActionKind::VncType => "VNC TYPE",
+            ActionKind::VncKey => "VNC KEY",
             ActionKind::SshExec => "SSH EXEC",
+            ActionKind::Other => "ACTION",
         }
     }
 }
@@ -189,14 +196,11 @@ pub fn render(canvas: &mut Canvas, a: &Approval) {
         }
         sy = preview_y + 70;
     } else {
-        draw_text(
-            canvas,
-            tx,
-            preview_y,
-            "(no preview - SSH exec)",
-            Font::F6x8,
-            INK,
-        );
+        let note = match a.kind {
+            ActionKind::SshExec => "(no preview - SSH exec)",
+            _ => "(no preview)",
+        };
+        draw_text(canvas, tx, preview_y, note, Font::F6x8, INK);
         sy = preview_y + 12;
     }
 
@@ -241,7 +245,7 @@ fn wrap_text(text: &str, max_chars: usize) -> Vec<String> {
 }
 
 /// Decodes padded/unpadded base64 into a byte vector (stdlib, no deps).
-fn b64_decode(s: &[u8]) -> Result<Vec<u8>, ()> {
+pub(crate) fn b64_decode(s: &[u8]) -> Result<Vec<u8>, ()> {
     let mut out = Vec::new();
     let mut acc: u32 = 0;
     let mut bits = 0;
@@ -288,7 +292,8 @@ fn synthetic_preview_b64() -> &'static str {
     Box::leak(base64_encode(&packed).into_boxed_str())
 }
 
-fn base64_encode(b: &[u8]) -> String {
+/// Standard padded base64 (stdlib only); also encodes `screen_snapshot` PNGs.
+pub(crate) fn base64_encode(b: &[u8]) -> String {
     const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut s = String::with_capacity(b.len().div_ceil(3) * 4);
     for chunk in b.chunks(3) {
@@ -335,6 +340,18 @@ mod tests {
                 || enc.ends_with('=') == (48 % 3 == 2)
                 || !enc.ends_with('=')
         );
+    }
+
+    #[test]
+    fn action_labels_cover_every_spec_action() {
+        let label = |action| ActionKind::from_action(action).label();
+        assert_eq!(label("vnc_click"), "VNC CLICK");
+        assert_eq!(label("vnc_type"), "VNC TYPE");
+        assert_eq!(label("vnc_key"), "VNC KEY");
+        assert_eq!(label("ssh_exec"), "SSH EXEC");
+        // Unknown actions get a neutral badge, never a known action's name.
+        assert_eq!(label("launch_missiles"), "ACTION");
+        assert_eq!(label(""), "ACTION");
     }
 
     #[test]

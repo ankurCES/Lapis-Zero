@@ -1,14 +1,26 @@
 [Unit]
 Description=Lapis-Zero framebuffer UI
-After=lapis-firstboot.service systemd-journald.service
-Requires=dev-fb0.device
-After=dev-fb0.device
+# Starts as soon as the root filesystem and udev allow, independently of
+# sysinit.target / basic.target: swap setup, cloud-init's local stage or any
+# slow first-boot job must never keep the screen on the boot logo.
+DefaultDependencies=no
+After=local-fs.target systemd-journald.socket systemd-udev-trigger.service
+# The BSP's fb_load splash is masked in the image (00-os-tuning): it holds the
+# LCD's DRM device until the *stock* launcher starts, which never happens here.
+# Do not bring back Conflicts=fb_load.service: sysinit.target wants that unit,
+# so any later transaction restarted it next to a running lapis-ui and the
+# screen stayed on the logo (first hardware boot, 2026-11-24).
+Conflicts=shutdown.target
+Before=shutdown.target
+# No device or network dependencies on purpose: lapis-ui waits for the LCD and
+# the keypad itself, and must come up even if everything else is broken.
 
 [Service]
 Type=simple
 ExecStart=/opt/lapis/bin/lapis-ui --fb
-Restart=on-failure
-RestartSec=3
+Restart=always
+RestartSec=2
+Nice=-5
 StandardOutput=journal
 StandardError=journal
 

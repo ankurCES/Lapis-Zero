@@ -1,0 +1,29 @@
+[Unit]
+Description=Lapis-Zero on-demand BLE provisioning (GATT)
+# Never enabled: lapis-daemon starts it for an unpaired first boot or an
+# explicit 5-minute pairing window and it exits when provisioning finishes.
+After=bluetooth.service lapis-daemon.service
+Wants=bluetooth.service
+# Exit 75 = "BlueZ or the adapter was not ready": retried a few times, then given up.
+StartLimitIntervalSec=300
+StartLimitBurst=4
+
+[Service]
+Type=simple
+EnvironmentFile=-/etc/lapis/secrets.env
+ExecStartPre=-/usr/sbin/rfkill unblock bluetooth
+ExecStart=/opt/lapis/venv/bin/lapis-ble-prov
+# Every pairing session, however it ends, leaves a fresh report on the SD card.
+ExecStopPost=-/usr/bin/systemctl --no-block start lapis-bootreport.service
+# 5 min pairing window + up to 10 min for a verified phone to finish Wi-Fi/Tailscale.
+RuntimeMaxSec=960
+# Only the retryable exit status restarts it: a clean end of the window (0), a stop
+# (SIGTERM) or RuntimeMaxSec must never reopen an advertising window on their own.
+Restart=no
+RestartForceExitStatus=75
+RestartSec=5
+# Soft ceiling for the whole cgroup: the process is ~50 MB after its imports and
+# it runs nmcli and the 32 MB tailscale CLI as children.  40M throttled it.
+MemoryHigh=96M
+StandardOutput=journal
+StandardError=journal

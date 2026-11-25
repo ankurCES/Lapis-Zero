@@ -1,20 +1,25 @@
-"""NDJSON IPC server on a Unix domain socket (SPEC 6)."""
+"""NDJSON IPC server on a Unix domain socket (SPEC 6): the on-device transport.
+
+A thin adapter over `Core`. lapis-ui is the usual client; the on-demand BLE
+provisioning process and CLI debug tools speak the same protocol.
+"""
 
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import os
-from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from lapis_daemon.agent.runner import TaskRunner
-from lapis_daemon.config import HostsConfig
-from lapis_daemon.db import LapisDb
-
 # A client that stops reading is dropped once this much output is queued for it.
 MAX_WRITE_BUFFER = 1024 * 1024
+# Frames only the remote control plane renders; keep them off the 1 FPS device UI.
+# (`task_finished` is not one of them: the LCD shows "done" and "error" from it.)
+SKIP = frozenset({"chat_message_created", "chat_updated", "chat_deleted", "telemetry_tick"})
+# A screen snapshot line is a base64 PNG of a 320x170 frame (well under this).
+LINE_LIMIT = 512 * 1024
 
 
 def toast(level: str, text: str) -> dict[str, Any]:
@@ -22,38 +27,12 @@ def toast(level: str, text: str) -> dict[str, Any]:
 
 
 class IpcServer:
-    def __init__(
-        self,
-        socket_path: str | Path,
-        db: LapisDb,
-        hosts: HostsConfig,
-        runner: TaskRunner,
-        state_provider: Callable[[], dict[str, Any]],
-    ) -> None:
+    def __init__(self, socket_path: str | Path, core: Any) -> None:
         self.socket_path = Path(socket_path)
-        self.db = db
-        self.hosts = hosts
-        self.runner = runner
-        self.state_provider = state_provider
-        preferred = state_provider().get("active_host", "")
-        self.active_host = preferred if preferred in hosts.hosts else next(iter(hosts.hosts), "")
+        self.core = core
         self._server: asyncio.Server | None = None
         self._writers: set[asyncio.StreamWriter] = set()
-        runner.emit_state = self.broadcast_state
-        runner.emit_event = self.send_to_all
-        runner.emit_approval = self.send_to_all
-        runner.emit_toast = lambda level, text: self.send_to_all(toast(level, text))
-
-    def state(self) -> dict[str, Any]:
-        """System status from the provider overlaid with live daemon state."""
-        return {
-            **self.state_provider(),
-            "type": "state_sync",
-            "agent_state": self.runner.agent_state,
-            "active_host": self.active_host,
-            "hosts": list(self.hosts.hosts),
-            "active_task": self.runner.active_task,
-        }
+        core.add_sink(self.send_to_all, SKIP)
 
     async def start(self) -> None:
         self.socket_path.parent.mkdir(parents=True, exist_ok=True)
@@ -61,7 +40,7 @@ class IpcServer:
         old_umask = os.umask(0o177)  # socket is created 0600
         try:
             self._server = await asyncio.start_unix_server(
-                self._handle_client, path=str(self.socket_path)
+                self._handle_client, path=str(self.socket_path), limit=LINE_LIMIT
             )
         finally:
             os.umask(old_umask)
@@ -88,14 +67,15 @@ class IpcServer:
         for writer in list(self._writers):
             self._send(writer, msg)
 
-    def broadcast_state(self) -> None:
-        self.send_to_all(self.state())
+    def send_mic(self, rms: float) -> None:
+        """Broadcast a live `mic_level` frame to the UI waveform."""
+        self.core.publish({"type": "mic_level", "rms": round(rms, 4)})
 
     async def _handle_client(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
     ) -> None:
         self._writers.add(writer)
-        self._send(writer, self.state())  # immediate re-sync for (re)connecting UIs
+        self._resync(writer)
         try:
             while line := await reader.readline():
                 if not line.strip():
@@ -104,47 +84,90 @@ class IpcServer:
                     await self._dispatch(json.loads(line), writer)
                 except Exception as exc:  # one bad message must not drop the connection
                     self._send(writer, toast("error", f"IPC error: {exc}"))
-        except (ConnectionError, ValueError):  # ValueError: line over the 64 KiB reader limit
+        except (ConnectionError, ValueError):  # ValueError: line over the reader limit
             pass
         finally:
             self._writers.discard(writer)
             writer.close()
 
+    def _resync(self, writer: asyncio.StreamWriter) -> None:
+        """Everything a (re)connecting UI needs to redraw: state, modal, pairing view."""
+        self._send(writer, self.core.state())
+        self._send(writer, {"type": "ui_settings", **self.core.ui})
+        for request in self.core.runner.pending.values():
+            self._send(writer, request)
+        if self.core.pairing is not None:
+            self._send(writer, self.core.pairing)
+
     async def _dispatch(self, msg: Any, writer: asyncio.StreamWriter) -> None:
+        core = self.core
         match msg:
             case {"type": "request_sync"}:
-                self._send(writer, self.state())
+                self._resync(writer)
             case {"type": "submit_task", "host": str(host), "prompt": str(prompt)} if (
                 prompt.strip()
             ):
                 # Returns once the task is persisted; the step loop runs as its own asyncio.Task.
                 try:
-                    await self.runner.submit_task(host, prompt)
-                except ValueError as exc:
+                    await core.submit_prompt(prompt, host=host, source="device")
+                except (ValueError, LookupError) as exc:
                     self._send(writer, toast("warn", str(exc)))
             case {
                 "type": "approval_decision",
                 "request_id": str(request_id),
                 "decision": "approve_once" | "approve_session" | "deny" as decision,
             }:
-                self.runner.resolve_approval(request_id, decision)
-            case {"type": "select_host", "host": str(host)} if host in self.hosts.hosts:
-                self.active_host = host
-                self.broadcast_state()
+                core.decide(request_id, decision, "device")
+            case {"type": "select_host", "host": str(host)}:
+                core.select_host(host)
             case {"type": "agent_control", "command": "kill_all"}:
-                await self.runner.kill_all()
+                await core.kill_all("device")
             case {"type": "agent_control", "command": "pause"}:
-                self.runner.pause()
-                self.broadcast_state()
+                core.runner.pause()
+                core.broadcast_state()
             case {"type": "agent_control", "command": "resume"}:
-                self.runner.resume()
-                self.broadcast_state()
+                core.runner.resume()
+                core.broadcast_state()
             case {
                 "type": "system_control",
                 "command": "retry_tailscale" | "reboot" | "shutdown" as command,
             }:
-                self.send_to_all(toast("info", f"(mock) {command} scheduled"))
+                await core.system_control(command)
+            case {"type": "pairing_control", "command": "start"}:
+                try:
+                    await core.pairing_start(str(msg.get("mode", "auto")))
+                except ValueError as exc:
+                    self._send(writer, toast("warn", str(exc)))
+            case {"type": "pairing_control", "command": "stop"}:
+                await core.pairing_stop()
+            case {"type": "pairing_event"}:  # from lapis-ble-prov
+                core.on_pairing_event(msg)
+            case {"type": "reload_secrets"}:  # from lapis-ble-prov after push_secrets
+                core.reload_secrets()
+            case {"type": "refresh_status"}:  # from lapis-ble-prov after Wi-Fi / Tailscale
+                await core.status.refresh()
+                core.broadcast_state()
+            case {"type": "screen_snapshot", "id": str(request_id), "png_b64": str(data)}:
+                core.on_screen_snapshot(request_id, base64.b64decode(data))
             case {"type": "ptt_audio", "state": "start" | "stop" as state}:
-                self.send_to_all({"type": "mic_level", "rms": 0.42 if state == "start" else 0.0})
+                await self._handle_ptt(state)
             case _:
                 self._send(writer, toast("warn", "Unrecognized IPC message"))
+
+    async def _handle_ptt(self, state: str) -> None:
+        """Route a PTT edge to the voice controller, or fake a wave in mock mode."""
+        voice = self.core.voice
+        if voice is None:
+            if self.core.mock:
+                self.send_mic(0.42 if state == "start" else 0.0)
+            elif state == "start":
+                # Never invent a transcript on a real device.
+                self.core.toast("warn", "Voice input is not configured")
+            return
+        try:
+            if state == "start":
+                await voice.begin_ptt()
+            else:
+                await voice.end_ptt()
+        except Exception as exc:
+            self.core.toast("error", f"voice: {exc}")

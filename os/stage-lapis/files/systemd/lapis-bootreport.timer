@@ -1,0 +1,18 @@
+[Unit]
+Description=Write the Lapis-Zero boot report once the boot has settled
+
+[Timer]
+# Early enough to catch a boot that dies young, then again through the first
+# half hour: pairing, the Wi-Fi join and the Tailscale login all happen minutes
+# after boot.  Each later snapshot replaces the earlier one (the report is also
+# rewritten whenever a Bluetooth pairing session ends).
+OnBootSec=45s
+OnBootSec=180s
+OnBootSec=6min
+OnBootSec=10min
+OnBootSec=15min
+OnBootSec=20min
+OnBootSec=30min
+
+[Install]
+WantedBy=timers.target

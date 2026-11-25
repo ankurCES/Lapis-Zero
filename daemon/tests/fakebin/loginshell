@@ -1,0 +1,12 @@
+#!/bin/sh
+# Stands in for an account's interactive login shell (`$SHELL -lic <command>`).
+# Before the command it prints what start-up files print: a greeting, a window title,
+# a line that looks like one of the driver's markers, a prompt without a newline.
+# And only it knows the PATH with the agent tools on it.
+echo "Last login: Tue Nov 24 09:12:44 on ttys003"
+printf '\033]0;tester@host\007'
+echo "LAPIS-BEGIN-0000000000000000"
+printf '\033[1;32mnvm\033[0m loaded  '
+[ "$1" = "-lic" ] || { echo "login shell: unexpected arguments: $*"; exit 97; }
+PATH="$HOME/bin:$PATH"; export PATH
+exec /bin/sh -c "$2"

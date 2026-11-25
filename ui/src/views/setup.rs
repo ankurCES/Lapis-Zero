@@ -12,8 +12,10 @@ pub struct SetupView {
     pub tailscale: String,
     pub tailscale_auth: Option<String>,
     pub api_key_ok: bool,
+    /// Pack voltage text; empty once the daemon is the source (it sends none).
     pub battery_v: String,
-    pub battery_pct: u8,
+    /// `None` when the daemon reports no fuel gauge.
+    pub battery_pct: Option<u8>,
     /// Highlighted quick action (index into [`ACTIONS`]).
     pub action: usize,
 }
@@ -34,7 +36,7 @@ impl SetupView {
             tailscale_auth: None,
             api_key_ok: true,
             battery_v: "3.9V".to_string(),
-            battery_pct: 84,
+            battery_pct: Some(84),
             action: 0,
         }
     }
@@ -96,8 +98,9 @@ pub fn render(canvas: &mut Canvas, s: &SetupView) {
     // Battery.
     let mut bb = [0u8; 48];
     let mut pb = [0u8; 4];
-    let pct = super::fmt_pct(&mut pb, s.battery_pct);
-    let b = super::fmt_into(&mut bb, &["Battery: ", &s.battery_v, "  ", pct]);
+    let pct = super::fmt_battery(&mut pb, s.battery_pct);
+    let gap = if s.battery_v.is_empty() { "" } else { "  " };
+    let b = super::fmt_into(&mut bb, &["Battery: ", &s.battery_v, gap, pct]);
     draw_text(canvas, x, y, b, Font::F6x8, INK);
     y += 22;
 

@@ -1,0 +1,22 @@
+[Unit]
+Description=Lapis-Zero Tailscale join + HTTPS serve for the control plane
+After=tailscaled.service lapis-firstboot.service network.target
+Wants=tailscaled.service
+ConditionPathExists=/usr/bin/tailscale
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/lapis/lapis-tailscale-up.sh
+# Offline at boot is normal (Wi-Fi not provisioned yet): keep retrying, backing
+# off from 30 s to 10 min so an unprovisioned device does not churn.
+Restart=on-failure
+RestartSec=30
+RestartSteps=6
+RestartMaxDelaySec=600
+# Worst case: a 60 s keyed join, then `serve` bounded at 30 s, plus status calls.
+TimeoutStartSec=150
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

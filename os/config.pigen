@@ -2,9 +2,7 @@
 #
 # This file is sourced by pi-gen's build.sh (either directly via `-c` or by
 # `build-docker.sh` mounting it at /config and rewriting `-c <path>` to
-# `-c /config`). It deliberately does NOT define IMAGE_TOTAL_SIZE: per
-# SPEC.md 4.1 we leave it unset so export-image auto-sizes a tight ext4 rootfs
-# and the standard pi-gen first-boot flow grows it on the card.
+# `-c /config`).
 
 # Friendly name of the OS (used verbatim in image filenames).
 IMG_NAME=lapis-zero
@@ -27,10 +25,23 @@ ARCH=arm64
 DEPLOY_COMPRESSION=xz
 COMPRESSION_LEVEL=6
 
-# Let pi-gen's first-boot resize handle the root partition; we do not pin a
-# fixed-image size (see header).
-# IMAGE_TOTAL_SIZE is intentionally unset.
+# Fixed-size image.  The CardputerZero pi-gen branch has no first-boot root
+# resize (no "resize" cmdline token, no initramfs growfs), so an auto-sized
+# image would boot with a nearly full root filesystem forever.  5 GiB leaves
+# >= 1.5 GiB free for the SQLite store, screenshots ring buffer and apt, and
+# fits any card from 8 GB up; xz squeezes the empty space out of the download.
+# Must satisfy (size - 520 MiB) % 8 MiB == 0 (export-image/prerun.sh).
+IMAGE_TOTAL_SIZE=5368709120
+export ROOT_MIN_FREE=$((1024 * 1024 * 1024))
+
+# The tailnet name and the HTTPS certificate name derive from the hostname.
+TARGET_HOSTNAME=lapis-zero
+
+# Do not install the BSP's first-boot disk-ID randomiser.  It rewrites the MBR
+# of the running card: /boot/firmware is pulled out from under running units
+# (seen on the device), and a power cut between its cmdline.txt rewrite and the
+# MBR write leaves the card unbootable.  stage-lapis masks the unit as well.
+RANDOMIZE_DISK_ID_ON_FIRST_BOOT=0
 
 # Pi-gen defaults we accept verbatim:
 #   USE_QEMU is managed by build-docker.sh (QEMU user binfmt on non-aarch64).
-#   RANDOMIZE_DISK_ID_ON_FIRST_BOOT defaults to 1 in build.sh.

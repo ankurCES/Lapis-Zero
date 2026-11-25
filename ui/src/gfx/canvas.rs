@@ -163,7 +163,70 @@ impl Canvas {
             }
         }
     }
+
+    /// Swaps [`INK`] and [`PAPER`] in place (the dark theme, applied to a finished
+    /// frame). Accent colours are untouched, and so is every pixel inside `keep`
+    /// (`(x, y, w, h)`): a QR code must stay dark-on-light to scan. Never allocates.
+    pub fn swap_ink_paper(&mut self, keep: Option<(i32, i32, i32, i32)>) {
+        let (ink, paper) = (split(INK), split(PAPER));
+        let keep = keep.and_then(|(x, y, w, h)| clip(x, y, w, h));
+        for (i, px) in self.buf.chunks_exact_mut(3).enumerate() {
+            let (x, y) = (i as i32 % WIDTH, i as i32 / WIDTH);
+            if keep.is_some_and(|(x0, y0, x1, y1)| (x0..x1).contains(&x) && (y0..y1).contains(&y)) {
+                continue;
+            }
+            if px == ink {
+                px.copy_from_slice(&paper);
+            } else if px == paper {
+                px.copy_from_slice(&ink);
+            }
+        }
+    }
+
+    /// Encodes the frame as a PNG (`screen_snapshot`, SPEC 6.3).
+    ///
+    /// The UI only draws the four palette colours, so the usual result is a
+    /// 2-bit indexed image of a few kB, which keeps the NDJSON line small. A
+    /// frame holding any other colour is written as 8-bit RGB instead.
+    pub fn encode_png(&self) -> Result<Vec<u8>, png::EncodingError> {
+        let mut out = Vec::new();
+        let mut enc = png::Encoder::new(&mut out, WIDTH as u32, HEIGHT as u32);
+        let indexed = self.pack_2bit();
+        if indexed.is_some() {
+            enc.set_color(png::ColorType::Indexed);
+            enc.set_depth(png::BitDepth::Two);
+            enc.set_palette(
+                PNG_PALETTE
+                    .iter()
+                    .flat_map(|c| split(*c))
+                    .collect::<Vec<u8>>(),
+            );
+        } else {
+            enc.set_color(png::ColorType::Rgb);
+            enc.set_depth(png::BitDepth::Eight);
+        }
+        let mut w = enc.write_header()?;
+        w.write_image_data(indexed.as_deref().unwrap_or(&self.buf))?;
+        w.finish()?;
+        Ok(out)
+    }
+
+    /// Packs the frame at 2 bits per pixel (indices into [`PNG_PALETTE`], leftmost
+    /// pixel in the high bits), or `None` if it holds a colour outside the palette.
+    fn pack_2bit(&self) -> Option<Vec<u8>> {
+        // Four pixels per byte and no row padding: the width is a multiple of 4.
+        const _: () = assert!(WIDTH % 4 == 0);
+        let mut out = vec![0u8; (WIDTH * HEIGHT / 4) as usize];
+        for (i, px) in self.buf.chunks_exact(3).enumerate() {
+            let idx = PNG_PALETTE.iter().position(|c| split(*c) == px)?;
+            out[i / 4] |= (idx as u8) << (6 - 2 * (i % 4));
+        }
+        Some(out)
+    }
 }
+
+/// Palette of an indexed [`Canvas::encode_png`] image.
+const PNG_PALETTE: [u32; 4] = [PAPER, INK, ACCENT_BLUE, ACCENT_AMBER];
 
 /// Splits `0xRRGGBB` into `[r, g, b]`.
 fn split(color: u32) -> [u8; 3] {
@@ -249,6 +312,55 @@ mod tests {
         assert_eq!(dst.get_pixel(0, 80), Some(ACCENT_BLUE));
         assert_eq!(dst.get_pixel(309, 80), Some(ACCENT_BLUE));
         assert_eq!(dst.get_pixel(310, 80), Some(PAPER));
+    }
+
+    #[test]
+    fn swap_ink_paper_spares_accents_and_the_keep_rect() {
+        let mut c = Canvas::new();
+        c.fill_rect(0, 0, 10, 10, INK);
+        c.fill_rect(20, 0, 10, 10, ACCENT_BLUE);
+        c.fill_rect(100, 100, 4, 4, INK); // inside the keep rect
+        c.swap_ink_paper(Some((96, 96, 12, 12)));
+        assert_eq!(c.get_pixel(0, 0), Some(PAPER));
+        assert_eq!(c.get_pixel(15, 5), Some(INK));
+        assert_eq!(c.get_pixel(20, 0), Some(ACCENT_BLUE));
+        assert_eq!(c.get_pixel(100, 100), Some(INK));
+        assert_eq!(c.get_pixel(96, 96), Some(PAPER));
+        assert_eq!(c.get_pixel(107, 107), Some(PAPER));
+        assert_eq!(c.get_pixel(108, 108), Some(INK));
+        // Swapping twice without a keep rect is the identity.
+        let before = c.pixels().to_vec();
+        c.swap_ink_paper(None);
+        c.swap_ink_paper(None);
+        assert_eq!(c.pixels(), &before[..]);
+    }
+
+    /// Decodes a PNG to `(width, height, RGB888 bytes)`.
+    fn decode_rgb(png_bytes: &[u8]) -> (u32, u32, Vec<u8>) {
+        let mut dec = png::Decoder::new(png_bytes);
+        dec.set_transformations(png::Transformations::EXPAND);
+        let mut reader = dec.read_info().unwrap();
+        let mut buf = vec![0; reader.output_buffer_size()];
+        let info = reader.next_frame(&mut buf).unwrap();
+        assert_eq!(info.color_type, png::ColorType::Rgb);
+        buf.truncate(info.buffer_size());
+        (info.width, info.height, buf)
+    }
+
+    #[test]
+    fn png_round_trips_indexed_and_rgb() {
+        let mut c = Canvas::new();
+        c.fill_rect(3, 5, 40, 20, INK);
+        c.fill_rect(317, 160, 3, 10, ACCENT_AMBER);
+        c.set_pixel(1, 0, ACCENT_BLUE);
+        let small = c.encode_png().unwrap();
+        assert_eq!(decode_rgb(&small), (320, 170, c.pixels().to_vec()));
+
+        // One off-palette pixel forces the RGB fallback, still pixel-exact.
+        c.set_pixel(160, 85, 0x123456);
+        let rgb = c.encode_png().unwrap();
+        assert_eq!(decode_rgb(&rgb), (320, 170, c.pixels().to_vec()));
+        assert!(small.len() < rgb.len());
     }
 
     #[test]

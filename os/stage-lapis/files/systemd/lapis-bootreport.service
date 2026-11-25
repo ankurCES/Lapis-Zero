@@ -1,0 +1,9 @@
+[Unit]
+Description=Lapis-Zero boot report on the FAT partition
+RequiresMountsFor=/boot/firmware
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/lapis/lapis-bootreport.sh
+StandardOutput=journal
+StandardError=journal

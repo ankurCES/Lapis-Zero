@@ -1,13 +1,18 @@
 [Unit]
 Description=Lapis-Zero software KVM agent daemon
-After=lapis-firstboot.service network-online.target
-Wants=network-online.target
+After=lapis-firstboot.service network.target tailscaled.service bluetooth.service
+Wants=lapis-firstboot.service
 
 [Service]
 Type=simple
+EnvironmentFile=-/etc/lapis/secrets.env
 ExecStart=/opt/lapis/venv/bin/lapis-daemon
-Restart=on-failure
+RuntimeDirectory=lapis
+RuntimeDirectoryPreserve=yes
+StateDirectory=lapis
+Restart=always
 RestartSec=3
+MemoryHigh=130M
 StandardOutput=journal
 StandardError=journal
 

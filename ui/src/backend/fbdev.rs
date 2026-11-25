@@ -1,11 +1,22 @@
-//! `/dev/fb0` embedded-framebuffer backend (CardputerZero CM0, ST7789v3 over SPI).
+//! fbdev backend for the CardputerZero LCD (ST7789v3 over SPI).
 //!
-//! The kernel exposes the panel as `fbcon=map:off`'d `/dev/fb0` in 16 bpp RGB565.
-//! This module converts the software canvas's RGB888 frame into packed RGB565 and
-//! blits it with stride awareness (the framebuffer `line_length` can exceed the
-//! visible width). All Linux-only syscalls live behind `#[cfg(target_os = "linux")]`;
-//! the conversion and stride blit stay portable so they can be unit-tested on any
-//! host (mock test) without a device.
+//! The BSP drives the panel with a DRM driver (`panel-mipi-dbi-m5stack`); what we
+//! open is its fbdev *emulation*, 16 bpp RGB565, which udev links as `/dev/fb_lcd`
+//! (usually also `/dev/fb0`). Three consequences, all learned on the hardware:
+//!
+//! * With `fbcon=map:off` nothing ever enables the display pipeline, so we
+//!   unblank and re-activate the mode ourselves on open.
+//! * While another process holds the DRM device with its own framebuffer (the
+//!   BSP's `fb_load` splash) fbdev writes are invisible and those two ioctls
+//!   silently do nothing, so the image masks `fb_load.service`.
+//! * `/dev/fb0` is not always the panel. Until the DRM modules load (about 12 s
+//!   into boot) it is the firmware's 16 bpp simple-framebuffer, which the kernel
+//!   then removes; a process that latched onto it draws into nothing for good.
+//!   [`check_lcd_mode`] therefore accepts only the panel's own geometry.
+//!
+//! The RGB888 -> RGB565 conversion and the stride-aware blit are portable and
+//! unit-tested on any host; every Linux syscall sits behind
+//! `#[cfg(target_os = "linux")]`.
 
 #[cfg(target_os = "linux")]
 use crate::gfx::canvas::Canvas;
@@ -16,7 +27,17 @@ use crate::gfx::canvas::{HEIGHT, WIDTH};
 #[cfg(target_os = "linux")]
 const FBIOGET_VSCREENINFO: libc::c_ulong = 0x4600;
 #[cfg(target_os = "linux")]
+const FBIOPUT_VSCREENINFO: libc::c_ulong = 0x4601;
+#[cfg(target_os = "linux")]
 const FBIOGET_FSCREENINFO: libc::c_ulong = 0x4602;
+#[cfg(target_os = "linux")]
+const FBIOBLANK: libc::c_ulong = 0x4611;
+/// `FB_ACTIVATE_NOW | FB_ACTIVATE_FORCE`: re-run `set_par` even if nothing changed.
+#[cfg(target_os = "linux")]
+const FB_ACTIVATE_NOW_FORCE: u32 = 128;
+
+/// Candidate nodes for the LCD, most specific first.
+pub const LCD_PATHS: [&str; 3] = ["/dev/fb_lcd", "/dev/fb0", "/dev/fb1"];
 
 /// Packs one 8-bit RGB triple into RGB565 (`rrrrr gggggg bbbbb`).
 ///
@@ -61,10 +82,35 @@ pub fn blit_rgb565_rows(
     }
 }
 
+/// Accepts only the CardputerZero panel: 16 bpp at exactly 320x170.
+///
+/// The firmware simple-framebuffer and an HDMI console are also 16 bpp, so the
+/// pixel depth alone does not identify the LCD (see the module docs).
+pub fn check_lcd_mode(xres: u32, yres: u32, bits_per_pixel: u32) -> Result<(), String> {
+    use crate::gfx::canvas::{HEIGHT, WIDTH};
+    if bits_per_pixel != 16 {
+        return Err(format!(
+            "{xres}x{yres} at {bits_per_pixel} bpp is not 16 bpp RGB565"
+        ));
+    }
+    if xres != WIDTH as u32 || yres != HEIGHT as u32 {
+        return Err(format!(
+            "{xres}x{yres} is not the {WIDTH}x{HEIGHT} LCD (firmware or HDMI framebuffer?)"
+        ));
+    }
+    Ok(())
+}
+
+/// The driver name in `fb_fix_screeninfo.id` (NUL-padded, at most 16 bytes).
+pub fn fix_id_str(id: &[u8]) -> String {
+    let end = id.iter().position(|&b| b == 0).unwrap_or(id.len());
+    String::from_utf8_lossy(&id[..end]).into_owned()
+}
+
 /// The `struct fb_bitfield` the kernel reports for each colour channel.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
-#[cfg(target_os = "linux")]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 struct FbBitfield {
     offset: u32,
     length: u32,
@@ -74,7 +120,7 @@ struct FbBitfield {
 /// The `struct fb_var_screeninfo` returned by `FBIOGET_VSCREENINFO`. Field order
 /// is the kernel ABI; `#[repr(C)]` reproduces its padding exactly on aarch64.
 #[repr(C)]
-#[cfg(target_os = "linux")]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 struct FbVarScreeninfo {
     xres: u32,
     yres: u32,
@@ -110,7 +156,7 @@ struct FbVarScreeninfo {
 /// The `struct fb_fix_screeninfo` returned by `FBIOGET_FSCREENINFO`. We only read
 /// `line_length` and `smem_len`, but the layout must match so offsets line up.
 #[repr(C)]
-#[cfg(target_os = "linux")]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 struct FbFixScreeninfo {
     id: [u8; 16],
     smem_start: usize,
@@ -149,11 +195,24 @@ pub struct FbBackend {
     stride_pixels: usize,
     visible_h: usize,
     rgb565: Vec<u16>,
+    id: String,
 }
 
 #[cfg(target_os = "linux")]
 impl FbBackend {
-    /// Opens `path` (usually `/dev/fb0`), queries the fixed + variable screen
+    /// Opens the first usable node in [`LCD_PATHS`]; the error names every miss.
+    pub fn open_lcd() -> std::io::Result<(Self, &'static str)> {
+        let mut misses = String::new();
+        for path in LCD_PATHS {
+            match Self::open(path) {
+                Ok(fb) => return Ok((fb, path)),
+                Err(e) => misses.push_str(&format!("{path}: {e}; ")),
+            }
+        }
+        Err(std::io::Error::other(misses))
+    }
+
+    /// Opens `path` (usually `/dev/fb_lcd`), queries the fixed + variable screen
     /// info and memory-maps the framebuffer. Fails with a descriptive error if
     /// the panel is not 16 bpp RGB565.
     pub fn open(path: &str) -> std::io::Result<Self> {
@@ -170,12 +229,9 @@ impl FbBackend {
         if unsafe { libc::ioctl(fd, FBIOGET_VSCREENINFO, &mut var) } != 0 {
             return Err(std::io::Error::last_os_error());
         }
-        if var.bits_per_pixel != 16 {
-            return Err(std::io::Error::other(format!(
-                "{path}: expected 16 bpp RGB565, got {} bpp (grayscale={})",
-                var.bits_per_pixel, var.grayscale
-            )));
-        }
+        // Nothing below may change the device until it is known to be the LCD.
+        check_lcd_mode(var.xres, var.yres, var.bits_per_pixel)
+            .map_err(|why| std::io::Error::other(format!("{path}: {why}")))?;
 
         // Fixed screen info: physical memory size and line stride.
         let mut fix: FbFixScreeninfo = unsafe { std::mem::zeroed() };
@@ -188,6 +244,17 @@ impl FbBackend {
                 "{path}: line_length {line_length} too small for 320x170 RGB565"
             )));
         }
+        // The node is the LCD. Take the display: unblank, then force the fbdev
+        // mode back onto the CRTC. This is what initialises the panel when no DRM
+        // master ever ran (proven on the device, 2026-11-24, in this order: the
+        // two ioctls first, then the mmap). Both calls report success even when
+        // a DRM master makes them no-ops.
+        unsafe {
+            libc::ioctl(fd, FBIOBLANK, 0 as libc::c_ulong);
+            var.activate = FB_ACTIVATE_NOW_FORCE;
+            libc::ioctl(fd, FBIOPUT_VSCREENINFO, &var);
+        }
+
         let stride_pixels = line_length / 2;
         let vheight = var.yres_virtual.max(var.yres) as usize;
         let map_len = (line_length * vheight.max(HEIGHT as usize)).max(fix.smem_len as usize);
@@ -214,7 +281,13 @@ impl FbBackend {
             stride_pixels,
             visible_h,
             rgb565: vec![0u16; (WIDTH * HEIGHT) as usize],
+            id: fix_id_str(&fix.id),
         })
+    }
+
+    /// The kernel driver behind this framebuffer, e.g. `panel-mipi-dbid`.
+    pub fn id(&self) -> &str {
+        &self.id
     }
 
     /// Returns the visible height of the panel (`min(yres, 170)`).
@@ -253,6 +326,40 @@ impl super::DisplayBackend for FbBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The ioctl structs must match `include/uapi/linux/fb.h` byte for byte on a
+    /// 64-bit kernel, or FBIOGET_* would write past them / be read at wrong offsets.
+    #[test]
+    #[cfg(target_pointer_width = "64")]
+    fn fbdev_abi_struct_layouts() {
+        use std::mem::{offset_of, size_of};
+        assert_eq!(size_of::<FbBitfield>(), 12);
+        assert_eq!(size_of::<FbVarScreeninfo>(), 160);
+        assert_eq!(offset_of!(FbVarScreeninfo, bits_per_pixel), 24);
+        assert_eq!(offset_of!(FbVarScreeninfo, activate), 84);
+        assert_eq!(size_of::<FbFixScreeninfo>(), 80);
+        assert_eq!(offset_of!(FbFixScreeninfo, smem_len), 24);
+        assert_eq!(offset_of!(FbFixScreeninfo, line_length), 48);
+    }
+
+    #[test]
+    fn only_the_panel_geometry_is_accepted() {
+        assert_eq!(check_lcd_mode(320, 170, 16), Ok(()));
+        // The firmware simple-framebuffer that /dev/fb0 is early in boot (16 bpp,
+        // which is why depth alone let lapis-ui latch onto it on the hardware).
+        for (w, h) in [(656, 416), (640, 480), (720, 480), (1920, 1080), (170, 320)] {
+            let err = check_lcd_mode(w, h, 16).unwrap_err();
+            assert!(err.contains("is not the 320x170 LCD"), "{err}");
+        }
+        assert!(check_lcd_mode(320, 170, 32).unwrap_err().contains("32 bpp"));
+    }
+
+    #[test]
+    fn fix_id_stops_at_the_first_nul() {
+        assert_eq!(fix_id_str(b"panel-mipi-dbid\0"), "panel-mipi-dbid");
+        assert_eq!(fix_id_str(b"simple\0\0\0\0\0\0\0\0\0\0"), "simple");
+        assert_eq!(fix_id_str(b"0123456789abcdef"), "0123456789abcdef");
+    }
 
     #[test]
     fn rgb565_packs_5_6_5() {

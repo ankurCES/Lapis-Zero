@@ -48,7 +48,7 @@ impl Default for PromptView {
     }
 }
 
-pub fn render(canvas: &mut Canvas, p: &PromptView, now: f32) {
+pub fn render(canvas: &mut Canvas, p: &PromptView, now: f64) {
     // Panel: full-width prompt card below the status bar.
     canvas.fill_rect(10, CONTENT_Y, 300, 96, PAPER);
     canvas.draw_rect(10, CONTENT_Y, 300, 96, INK);

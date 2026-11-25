@@ -34,114 +34,155 @@ pub fn decode_input_event(buf: &[u8; 24]) -> EvEvent {
     EvEvent { kind, code, value }
 }
 
-/// Linux `linux/input-event-codes.h` keycodes used by the TCA8418 46-key map.
+/// Linux `linux/input-event-codes.h` keycodes emitted by the BSP's
+/// `tca8418_keypad_m5stack` driver. The driver resolves the `sym`/`fn` layers
+/// itself (see `linux,keymap1`/`keymap2` in `cardputerzero-v5-overlay.dts`), so
+/// userspace never sees a `KEY_FN`: `fn+U`/`fn+I` arrive as
+/// `KEY_BRIGHTNESSDOWN`/`UP`, `fn+F/X/Z/C` as arrow keys.
 mod keycode {
     pub const KEY_ESC: u16 = 1;
+    pub const KEY_BACKSPACE: u16 = 14;
     pub const KEY_TAB: u16 = 15;
     pub const KEY_ENTER: u16 = 28;
+    #[cfg(target_os = "linux")]
+    pub const KEY_LEFTSHIFT: u16 = 42;
+    #[cfg(target_os = "linux")]
+    pub const KEY_RIGHTSHIFT: u16 = 54;
+    pub const KEY_LEFTALT: u16 = 56;
     pub const KEY_SPACE: u16 = 57;
     pub const KEY_UP: u16 = 103;
-    pub const KEY_DOWN: u16 = 108;
     pub const KEY_LEFT: u16 = 105;
     pub const KEY_RIGHT: u16 = 106;
-    // Letters: KEY_A..KEY_Z are contiguous 30..=55 (`KEY_Q`=16 is before that,
-    // but the CardputerZero keymap emits QWERTY letter codes, so map the span).
-    // (KEY_A/KEY_W/KEY_P/KEY_M are referenced from tests.)
+    pub const KEY_DOWN: u16 = 108;
+    pub const KEY_DELETE: u16 = 111;
+    pub const KEY_BRIGHTNESSDOWN: u16 = 224;
+    pub const KEY_BRIGHTNESSUP: u16 = 225;
     #[cfg(test)]
     pub const KEY_A: u16 = 30;
     #[cfg(test)]
     pub const KEY_W: u16 = 17;
     #[cfg(test)]
-    pub const KEY_P: u16 = 25;
-    #[cfg(test)]
-    pub const KEY_M: u16 = 50;
     pub const KEY_Z: u16 = 44;
-    pub const KEY_C: u16 = 46;
-    pub const KEY_F: u16 = 33;
-    pub const KEY_X: u16 = 45;
-    pub const KEY_U: u16 = 22;
-    pub const KEY_I: u16 = 23;
 }
 
 const EV_KEY: u16 = 1;
 const KEY_RELEASE: i32 = 0;
 const KEY_PRESS: i32 = 1;
 
-/// Result of translating a key event, given the current `fn` modifier state.
+/// Result of translating a key event.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum KeyEvent {
     /// Nothing the UI cares about.
     Ignored,
-    /// A normal press (or autorepeat).
+    /// A press (or an autorepeat of a repeatable key).
     Press(LapisKey),
-    /// A key release (used to terminate ESC-hold).
+    /// A key release.
     Release(LapisKey),
-    /// `fn` itself toggled (not surfaced to the app).
-    Fn,
 }
 
-fn printable_from_keycode(code: u16) -> Option<char> {
-    // QWERTY: KEY_Q=16 .. KEY_P=25, KEY_A=30 .. KEY_L=38, KEY_Z=44 .. KEY_M=50.
-    // QWERTY rows are keycode-contiguous but not alphabet-contiguous, so map by
-    // explicit row strings (Linux KEY_Q=16..=25, KEY_A=30..=38, KEY_Z=44..=50).
+/// `sym`-layer keycodes -> the symbol printed on the keycap, ported from the
+/// BSP console keymap `/usr/share/keymaps/tca8418_keypad_m5stack_keymap.map`.
+const SYM_LAYER: [(u16, char); 32] = [
+    (26, '!'),
+    (27, '@'),
+    (39, '#'),
+    (40, '$'),
+    (41, '%'),
+    (43, '^'),
+    (51, '&'),
+    (52, '*'),
+    (53, '('),
+    (94, ')'),
+    (55, '~'),
+    (69, '`'),
+    (70, '_'),
+    (71, '-'),
+    (72, '+'),
+    (73, '='),
+    (74, '['),
+    (75, ']'),
+    (76, '{'),
+    (77, '}'),
+    (79, ';'),
+    (80, ':'),
+    (81, '\''),
+    (82, '"'),
+    (83, '<'),
+    (85, '>'),
+    (86, '\\'),
+    (89, '|'),
+    (90, ','),
+    (91, '.'),
+    (92, '/'),
+    (93, '?'),
+];
+
+fn printable_from_keycode(code: u16, shift: bool) -> Option<char> {
+    // Base layer: KEY_1=2..KEY_0=11, KEY_Q=16..=25, KEY_A=30..=38, KEY_Z=44..=50.
     for (start, row) in [
+        (2u16, b"1234567890".as_slice()),
         (16u16, b"qwertyuiop".as_slice()),
         (30u16, b"asdfghjkl".as_slice()),
         (44u16, b"zxcvbnm".as_slice()),
     ] {
-        let idx = code.checked_sub(start)? as usize;
-        if let Some(&ch) = row.get(idx) {
-            return Some(ch as char);
+        if let Some(&ch) = code
+            .checked_sub(start)
+            .and_then(|idx| row.get(idx as usize))
+        {
+            let ch = ch as char;
+            return Some(if shift { ch.to_ascii_uppercase() } else { ch });
         }
     }
-    None
+    SYM_LAYER
+        .iter()
+        .find(|(c, _)| *c == code)
+        .map(|(_, ch)| *ch)
 }
 
-/// Maps one evdev key event onto a semantic [`KeyEvent`].
-///
-/// `fn_held` makes `U`/`I` become backlight-down/up (SPEC 5.4). Letters that
-/// aren't reserved return [`KeyEvent::Press(LapisKey::Char(...))`].
-pub fn map_keycode(code: u16, fn_held: bool) -> KeyEvent {
+/// Maps one evdev keycode onto a semantic key. Letters stay [`LapisKey::Char`];
+/// the shared `App::key` turns `z/c/f/x` into navigation outside the Prompt view.
+pub fn map_keycode(code: u16, shift: bool) -> KeyEvent {
     use keycode::*;
     match code {
         KEY_ENTER => KeyEvent::Press(LapisKey::Enter),
         KEY_ESC => KeyEvent::Press(LapisKey::Esc),
         KEY_TAB => KeyEvent::Press(LapisKey::Tab),
-        KEY_LEFT | KEY_Z => KeyEvent::Press(LapisKey::CycleL),
-        KEY_RIGHT | KEY_C => KeyEvent::Press(LapisKey::CycleR),
-        KEY_UP | KEY_F => KeyEvent::Press(LapisKey::Up),
-        KEY_DOWN | KEY_X => KeyEvent::Press(LapisKey::Down),
-        KEY_U if fn_held => KeyEvent::Press(LapisKey::BacklightDown),
-        KEY_I if fn_held => KeyEvent::Press(LapisKey::BacklightUp),
+        KEY_LEFT => KeyEvent::Press(LapisKey::CycleL),
+        KEY_RIGHT => KeyEvent::Press(LapisKey::CycleR),
+        KEY_UP => KeyEvent::Press(LapisKey::Up),
+        KEY_DOWN => KeyEvent::Press(LapisKey::Down),
+        KEY_BRIGHTNESSDOWN => KeyEvent::Press(LapisKey::BacklightDown),
+        KEY_BRIGHTNESSUP => KeyEvent::Press(LapisKey::BacklightUp),
+        KEY_BACKSPACE | KEY_DELETE => KeyEvent::Press(LapisKey::Char('\x08')),
         KEY_SPACE => KeyEvent::Press(LapisKey::Char(' ')),
-        c => match printable_from_keycode(c) {
+        c => match printable_from_keycode(c, shift) {
             Some(ch) => KeyEvent::Press(LapisKey::Char(ch)),
             None => KeyEvent::Ignored,
         },
     }
 }
 
-/// Converts a raw `(kind, code, value)` triplet (already decoded) into the
-/// higher-level [`KeyEvent`], tracking the ESC hold state for the kill-switch.
-pub fn translate_event(kind: u16, code: u16, value: i32, fn_held: bool) -> KeyEvent {
+/// Converts a decoded `(kind, code, value)` triplet into a [`KeyEvent`].
+/// `value`: 0 release, 1 press, 2 autorepeat.
+pub fn translate_event(kind: u16, code: u16, value: i32, shift: bool) -> KeyEvent {
     if kind != EV_KEY {
         return KeyEvent::Ignored;
     }
-    // `fn` on the TCA8418 matrix surfaces as a dedicated keycode; treat it as a
-    // pure modifier and never forward it to the views. (0x1d0 is the Linux
-    // `KEY_FN`; some keymaps emit `KEY_LEFTMETA` instead.)
-    if code == 0x1d0 || code == 125 {
-        return KeyEvent::Fn;
+    // Push-to-Talk is the `opt`/alt key held down (SPEC 5.3): surface the two
+    // edges only, never the autorepeat in between.
+    if code == keycode::KEY_LEFTALT {
+        return match value {
+            KEY_PRESS => KeyEvent::Press(LapisKey::PushToTalk(true)),
+            KEY_RELEASE => KeyEvent::Press(LapisKey::PushToTalk(false)),
+            _ => KeyEvent::Ignored,
+        };
     }
-    let ev = map_keycode(code, fn_held);
-    match ev {
-        KeyEvent::Press(k) => {
-            if value == KEY_RELEASE {
-                KeyEvent::Release(k)
-            } else {
-                // Autorepeat also counts as a held press for char entry.
-                ev
-            }
+    match map_keycode(code, shift) {
+        KeyEvent::Press(k) if value == KEY_RELEASE => KeyEvent::Release(k),
+        // Autorepeat must never re-fire a confirm/cancel (a held ENTER would
+        // approve the *next* request too); only navigation and text repeat.
+        KeyEvent::Press(LapisKey::Enter | LapisKey::Esc | LapisKey::Tab) if value != KEY_PRESS => {
+            KeyEvent::Ignored
         }
         other => other,
     }
@@ -168,6 +209,18 @@ impl EscHold {
 
     fn now() -> Instant {
         Instant::now()
+    }
+
+    /// Called every frame: fires [`LapisKey::EscHold`] once, while ESC is still
+    /// down, as soon as the threshold elapses (the kill-switch must not wait
+    /// for the release).
+    pub fn poll(&mut self) -> Option<LapisKey> {
+        let down = self.down_since?;
+        if self.fired || down.elapsed() < self.threshold {
+            return None;
+        }
+        self.fired = true;
+        Some(LapisKey::EscHold)
     }
 
     /// Feeds a decoded key event; returns `Some(EscHold)` exactly once when the
@@ -242,6 +295,14 @@ pub fn clamp_brightness(current: u32, delta: i32, max: u32) -> u32 {
     (cur + delta as i64).clamp(0, m) as u32
 }
 
+/// Maps a `ui_settings.brightness` percentage (SPEC 6.3) onto a sysfs level:
+/// that share of `max`, rounded, but never 0 — only the idle policy may turn an
+/// awake screen dark.
+pub fn brightness_level(pct: u8, max: u32) -> u32 {
+    let level = (max as u64 * pct.min(100) as u64 + 50) / 100;
+    (level as u32).max(1).min(max)
+}
+
 /// Backlight idle policy (SPEC 5.2 §272): auto-dim at 30 s, off at 90 s.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BacklightState {
@@ -312,6 +373,10 @@ pub mod linux_io {
                 .parse()
                 .unwrap_or(0);
             Ok(Self { root, max })
+        }
+
+        pub fn max(&self) -> u32 {
+            self.max
         }
 
         pub fn brightness(&self) -> u32 {
@@ -407,29 +472,69 @@ pub mod linux_io {
         }
     }
 
-    /// TCA8418 keypad via `evdev`: opens a device (by path or the first whose
-    /// sysfs `name` contains `tca8418`), reads with FIONREAD (never blocks),
-    /// decodes events and maintains the `fn`-modifier + ESC-hold state.
+    /// Sleeps until the next frame is due, or earlier if a key or a daemon frame
+    /// arrives. At the idle rate (1 FPS) a plain sleep would make the first key
+    /// press, an approval or a screen request wait up to a second; `poll(2)` keeps
+    /// the CPU just as idle but wakes immediately.
+    pub fn wait_frame(fds: &[std::os::fd::RawFd], timeout: Duration) {
+        let mut set: Vec<libc::pollfd> = fds
+            .iter()
+            .map(|&fd| libc::pollfd {
+                fd,
+                events: libc::POLLIN,
+                revents: 0,
+            })
+            .collect();
+        let ms = timeout.as_millis().min(1000) as libc::c_int;
+        // EINTR or an error simply ends the wait early; the loop redraws either way.
+        unsafe { libc::poll(set.as_mut_ptr(), set.len() as libc::nfds_t, ms) };
+    }
+
+    /// `EVIOCGRAB` = `_IOW('E', 0x90, int)` from `<linux/input.h>`.
+    const EVIOCGRAB: libc::c_ulong = 0x4004_4590;
+
+    /// The BSP's stable keypad node (TCA8418 on i2c1).
+    pub const KEYPAD_BY_PATH: &str = "/dev/input/by-path/platform-3f804000.i2c-event";
+
+    /// TCA8418 keypad via `evdev`: non-blocking reads (evdev has no FIONREAD),
+    /// every decoded key queued so fast typing never drops a character.
     pub struct EvdevInput {
         file: std::fs::File,
-        buf: Vec<u8>,
-        fn_held: bool,
+        queue: std::collections::VecDeque<LapisKey>,
+        shift: bool,
         esc_hold: EscHold,
+        dead: bool,
     }
 
     impl EvdevInput {
         pub fn open(path: &Path) -> std::io::Result<Self> {
-            let file = std::fs::OpenOptions::new().read(true).open(path)?;
+            use std::os::unix::fs::OpenOptionsExt;
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NONBLOCK)
+                .open(path)?;
+            // Exclusive grab: without it every key also reaches the kernel VT,
+            // i.e. the (invisible) login prompt on tty1 would receive whatever
+            // is typed into a task prompt. Best effort; EBUSY just means shared.
+            {
+                use std::os::fd::AsRawFd;
+                unsafe { libc::ioctl(file.as_raw_fd(), EVIOCGRAB, 1 as libc::c_int) };
+            }
             Ok(Self {
                 file,
-                buf: vec![0u8; 64 * 24],
-                fn_held: false,
+                queue: std::collections::VecDeque::new(),
+                shift: false,
                 esc_hold: EscHold::new(Duration::from_millis(1500)),
+                dead: false,
             })
         }
 
-        /// Lazy import-safe guard: the evdev read path only exists on Linux.
+        /// Opens the keypad: the BSP by-path node first, else the first evdev
+        /// device whose sysfs `name` contains `tca8418`.
         pub fn open_keypad() -> std::io::Result<Self> {
+            if let Ok(ev) = Self::open(Path::new(KEYPAD_BY_PATH)) {
+                return Ok(ev);
+            }
             for entry in std::fs::read_dir("/dev/input")? {
                 let p = entry?.path();
                 let Ok(meta) = std::fs::metadata(&p) else {
@@ -450,43 +555,68 @@ pub mod linux_io {
             }
             Err(std::io::Error::other("no tca8418 evdev device found"))
         }
+
+        /// The evdev file descriptor (for `poll(2)` in the fb loop).
+        pub fn raw_fd(&self) -> std::os::fd::RawFd {
+            use std::os::fd::AsRawFd;
+            self.file.as_raw_fd()
+        }
+
+        /// True once the device node went away (unbind/replug): reopen it.
+        pub fn is_dead(&self) -> bool {
+            self.dead
+        }
+
+        fn pump(&mut self) {
+            let mut buf = [0u8; 16 * 24];
+            loop {
+                let read = match self.file.read(&mut buf) {
+                    Ok(0) => return,
+                    Ok(n) => n,
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => return,
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(_) => {
+                        self.dead = true;
+                        return;
+                    }
+                };
+                for chunk in buf[..read].chunks_exact(24) {
+                    let mut e = [0u8; 24];
+                    e.copy_from_slice(chunk);
+                    let ev = decode_input_event(&e);
+                    if ev.kind != EV_KEY {
+                        continue;
+                    }
+                    if ev.code == keycode::KEY_LEFTSHIFT || ev.code == keycode::KEY_RIGHTSHIFT {
+                        self.shift = ev.value != KEY_RELEASE;
+                        continue;
+                    }
+                    if ev.code == keycode::KEY_ESC {
+                        // Tap -> Esc on release; hold -> EscHold via `poll()`.
+                        if let Some(k) = self.esc_hold.feed(ev.kind, ev.code, ev.value) {
+                            self.queue.push_back(k);
+                        }
+                        continue;
+                    }
+                    if let KeyEvent::Press(k) =
+                        translate_event(ev.kind, ev.code, ev.value, self.shift)
+                    {
+                        self.queue.push_back(k);
+                    }
+                }
+            }
+        }
     }
 
     impl InputBackend for EvdevInput {
         fn poll_event(&mut self) -> Option<LapisKey> {
-            use std::os::fd::AsRawFd;
-            let fd = self.file.as_raw_fd();
-            let mut n: libc::c_int = 0;
-            if unsafe { libc::ioctl(fd, libc::FIONREAD, &mut n) } != 0 || n <= 0 {
-                return None;
-            }
-            let want = (n as usize).min(self.buf.len());
-            let read = self.file.read(&mut self.buf[..want]).ok()?;
-            let mut out = None;
-            for chunk in self.buf[..read].chunks_exact(24) {
-                let mut e = [0u8; 24];
-                e.copy_from_slice(chunk);
-                let ev = decode_input_event(&e);
-                // `fn` modifier tracking.
-                if ev.kind == 1 && (ev.code == 0x1d0 || ev.code == 125) {
-                    self.fn_held = ev.value == 1;
-                    continue;
-                }
-                if let Some(k) = self.esc_hold.feed(ev.kind, ev.code, ev.value) {
-                    // ESC-hold wins: it is the global kill-switch, and a bare
-                    // ESC tap is the back/cancel that follows it.
-                    out = Some(k);
-                    continue;
-                }
-                if let KeyEvent::Press(k) =
-                    translate_event(ev.kind, ev.code, ev.value, self.fn_held)
-                {
-                    // A release event for ESC is handled by the hold state
-                    // machine above; surface every other press (incl. repeat).
-                    out = Some(k);
+            if self.queue.is_empty() {
+                self.pump();
+                if let Some(k) = self.esc_hold.poll() {
+                    self.queue.push_back(k);
                 }
             }
-            out
+            self.queue.pop_front()
         }
     }
 }
@@ -514,82 +644,113 @@ mod tests {
     // --- keycode mapping ------------------------------------------------------
     #[test]
     fn maps_navigation_and_letters() {
+        use LapisKey as K;
         assert_eq!(
             map_keycode(keycode::KEY_ENTER, false),
-            KeyEvent::Press(LapisKey::Enter)
+            KeyEvent::Press(K::Enter)
         );
         assert_eq!(
-            map_keycode(keycode::KEY_Z, false),
-            KeyEvent::Press(LapisKey::CycleL)
+            map_keycode(keycode::KEY_LEFT, false),
+            KeyEvent::Press(K::CycleL)
         );
         assert_eq!(
-            map_keycode(keycode::KEY_C, false),
-            KeyEvent::Press(LapisKey::CycleR)
+            map_keycode(keycode::KEY_RIGHT, false),
+            KeyEvent::Press(K::CycleR)
         );
-        assert_eq!(
-            map_keycode(keycode::KEY_UP, false),
-            KeyEvent::Press(LapisKey::Up)
-        );
+        assert_eq!(map_keycode(keycode::KEY_UP, false), KeyEvent::Press(K::Up));
         assert_eq!(
             map_keycode(keycode::KEY_DOWN, false),
-            KeyEvent::Press(LapisKey::Down)
+            KeyEvent::Press(K::Down)
+        );
+        // Letters (incl. z/c/f/x) stay chars; `App::key` decides navigation.
+        assert_eq!(
+            map_keycode(keycode::KEY_Z, false),
+            KeyEvent::Press(K::Char('z'))
         );
         assert_eq!(
             map_keycode(keycode::KEY_W, false),
-            KeyEvent::Press(LapisKey::Char('w'))
+            KeyEvent::Press(K::Char('w'))
         );
         assert_eq!(
-            map_keycode(keycode::KEY_P, false),
-            KeyEvent::Press(LapisKey::Char('p'))
+            map_keycode(keycode::KEY_A, true),
+            KeyEvent::Press(K::Char('A'))
+        );
+        assert_eq!(map_keycode(2, false), KeyEvent::Press(K::Char('1')));
+        assert_eq!(map_keycode(11, false), KeyEvent::Press(K::Char('0')));
+        assert_eq!(
+            map_keycode(keycode::KEY_BACKSPACE, false),
+            KeyEvent::Press(K::Char('\x08'))
+        );
+        assert_eq!(map_keycode(0x2ff, false), KeyEvent::Ignored);
+    }
+
+    #[test]
+    fn sym_and_fn_layers_follow_the_bsp_keymap() {
+        use LapisKey as K;
+        // sym layer (keymap1) codes, per tca8418_keypad_m5stack_keymap.map.
+        assert_eq!(map_keycode(26, false), KeyEvent::Press(K::Char('!')));
+        assert_eq!(map_keycode(92, false), KeyEvent::Press(K::Char('/')));
+        assert_eq!(map_keycode(91, false), KeyEvent::Press(K::Char('.')));
+        assert_eq!(map_keycode(71, false), KeyEvent::Press(K::Char('-')));
+        // fn layer (keymap2): fn+U / fn+I are real brightness keycodes.
+        assert_eq!(
+            map_keycode(keycode::KEY_BRIGHTNESSDOWN, false),
+            KeyEvent::Press(K::BacklightDown)
         );
         assert_eq!(
-            map_keycode(keycode::KEY_A, false),
-            KeyEvent::Press(LapisKey::Char('a'))
-        );
-        assert_eq!(
-            map_keycode(keycode::KEY_M, false),
-            KeyEvent::Press(LapisKey::Char('m'))
+            map_keycode(keycode::KEY_BRIGHTNESSUP, false),
+            KeyEvent::Press(K::BacklightUp)
         );
     }
 
     #[test]
-    fn fn_modifier_routes_u_i_to_backlight() {
-        assert_eq!(
-            map_keycode(keycode::KEY_U, false),
-            KeyEvent::Press(LapisKey::Char('u'))
-        );
-        assert_eq!(
-            map_keycode(keycode::KEY_U, true),
-            KeyEvent::Press(LapisKey::BacklightDown)
-        );
-        assert_eq!(
-            map_keycode(keycode::KEY_I, true),
-            KeyEvent::Press(LapisKey::BacklightUp)
-        );
-    }
-
-    #[test]
-    fn translate_release_and_fn() {
+    fn translate_release_repeat_and_ptt() {
+        use LapisKey as K;
         assert_eq!(
             translate_event(EV_KEY, keycode::KEY_ENTER, KEY_RELEASE, false),
-            KeyEvent::Release(LapisKey::Enter)
+            KeyEvent::Release(K::Enter)
+        );
+        // A held ENTER must not auto-approve the next request.
+        assert_eq!(
+            translate_event(EV_KEY, keycode::KEY_ENTER, 2, false),
+            KeyEvent::Ignored
         );
         assert_eq!(
-            translate_event(EV_KEY, 0x1d0, KEY_PRESS, false),
-            KeyEvent::Fn
+            translate_event(EV_KEY, keycode::KEY_DOWN, 2, false),
+            KeyEvent::Press(K::Down)
+        );
+        assert_eq!(
+            translate_event(EV_KEY, keycode::KEY_LEFTALT, KEY_PRESS, false),
+            KeyEvent::Press(K::PushToTalk(true))
+        );
+        assert_eq!(
+            translate_event(EV_KEY, keycode::KEY_LEFTALT, 2, false),
+            KeyEvent::Ignored
+        );
+        assert_eq!(
+            translate_event(EV_KEY, keycode::KEY_LEFTALT, KEY_RELEASE, false),
+            KeyEvent::Press(K::PushToTalk(false))
         );
         assert_eq!(translate_event(0, 0, 0, false), KeyEvent::Ignored);
     }
 
     // --- ESC hold -------------------------------------------------------------
     #[test]
-    fn esc_hold_fires_once_at_threshold() {
+    fn esc_tap_is_esc_and_hold_fires_once_while_down() {
         let mut h = EscHold::new(Duration::from_millis(1500));
         assert_eq!(h.feed(EV_KEY, keycode::KEY_ESC, KEY_PRESS), None);
+        assert_eq!(h.poll(), None);
         assert_eq!(
             h.feed(EV_KEY, keycode::KEY_ESC, KEY_RELEASE),
             Some(LapisKey::Esc)
         );
+
+        let mut h = EscHold::new(Duration::ZERO);
+        assert_eq!(h.feed(EV_KEY, keycode::KEY_ESC, KEY_PRESS), None);
+        assert_eq!(h.poll(), Some(LapisKey::EscHold));
+        assert_eq!(h.poll(), None);
+        // The release after a fired hold is swallowed (no stray Esc).
+        assert_eq!(h.feed(EV_KEY, keycode::KEY_ESC, KEY_RELEASE), None);
     }
 
     // --- BQ27220 --------------------------------------------------------------
@@ -610,6 +771,19 @@ mod tests {
         assert_eq!(clamp_brightness(100, -20, 255), 80);
         assert_eq!(clamp_brightness(0, -1, 255), 0);
         assert_eq!(clamp_brightness(250, 20, 255), 255);
+    }
+
+    #[test]
+    fn brightness_percent_maps_to_a_nonzero_level() {
+        assert_eq!(brightness_level(100, 255), 255);
+        assert_eq!(brightness_level(80, 255), 204);
+        assert_eq!(brightness_level(50, 7), 4);
+        // Never dark while awake, never past the panel maximum.
+        assert_eq!(brightness_level(0, 255), 1);
+        assert_eq!(brightness_level(1, 31), 1);
+        assert_eq!(brightness_level(250, 255), 255);
+        // No backlight device (max 0): nothing to drive.
+        assert_eq!(brightness_level(80, 0), 0);
     }
 
     #[test]

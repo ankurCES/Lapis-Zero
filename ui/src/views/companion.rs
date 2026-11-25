@@ -1,15 +1,21 @@
-//! View 1: Companion / desk clock (SPEC 5.3). Left: mascot + large clock.
+//! View 1: Companion / desk clock (SPEC 5.3). Left: the agent's head + large clock.
 //! Right: active task title (2 lines), step counter, last tool summary, next cron.
 
 use crate::gfx::canvas::{Canvas, ACCENT_BLUE, INK};
 use crate::gfx::font::{draw_text, Font};
-use crate::gfx::mascot::{self, MascotAnim, MascotState};
+use crate::gfx::mascot::Mascot;
 use crate::ipc::DaemonState;
 
 use super::{Header, RULE_Y};
 
 /// Left/right column split (SPEC 5.3): mascot zone x=0..146, task zone x=152..316.
 const SPLIT: i32 = 150;
+
+/// The head's rest centre and radius. Its props need about 1.9 radii to the
+/// right (to the divider), 1.3 up (to the status bar) and 1.4 down (to the clock).
+pub const HEAD: (i32, i32, f32) = (74, 68, 38.0);
+/// Top of the desk clock.
+const CLOCK_Y: i32 = 126;
 
 /// Synthetic task defaults shown before the first `state_sync` arrives.
 const TASK_TITLE: &str = "Check CI logs and\nrestart worker";
@@ -23,18 +29,21 @@ pub fn render(
     header: &Header,
     daemon: &DaemonState,
     daemon_synced: bool,
+    offline: bool,
     last_tool: &str,
-    anim: &MascotAnim,
-    now: f32,
+    mascot: &Mascot,
+    now: f64,
+    dark: bool,
 ) {
     // Left zone.
-    mascot::draw(canvas, 24, 40, header.state, anim);
+    let (hx, hy, hr) = HEAD;
+    mascot.draw(canvas, hx, hy, hr, now, dark);
 
-    // Large desk clock below the mascot (F16x28).
+    // Large desk clock below the head (F16x28).
     let mut bb = [0u8; 5];
     let clock = super::fmt_clock(header.minutes, &mut bb);
-    let cx = 12 + (124 - Font::F16x28.text_width(clock)) / 2;
-    draw_text(canvas, cx, 92, clock, Font::F16x28, INK);
+    let cx = hx - Font::F16x28.text_width(clock) / 2;
+    draw_text(canvas, cx, CLOCK_Y, clock, Font::F16x28, INK);
 
     // Divider column.
     canvas.vline(
@@ -60,19 +69,31 @@ pub fn render(
         draw_text(canvas, rx, y, TASK_STEP, Font::F6x8, INK);
         y += 14;
 
-        draw_text(canvas, rx, y, "last", Font::F6x8, INK);
-        draw_text(canvas, rx + 24, y, TASK_LAST, Font::F6x8, ACCENT_BLUE);
+        draw_text(canvas, rx, y, "last:", Font::F6x8, INK);
+        draw_text(
+            canvas,
+            rx + 30,
+            y,
+            clip(TASK_LAST, VALUE_CHARS),
+            Font::F6x8,
+            ACCENT_BLUE,
+        );
         y += 14;
 
         draw_text(canvas, rx, y, "next:", Font::F6x8, INK);
         draw_text(canvas, rx + 30, y, TASK_NEXT, Font::F6x8, INK);
     } else {
-        let title = daemon
-            .active_task
-            .as_ref()
-            .map(|t| t.title.as_str())
-            .unwrap_or("No active task");
-        let (l1, l2) = split_two_lines(title, 19);
+        let title = if offline {
+            "Starting up... waiting for the agent"
+        } else {
+            daemon
+                .active_task
+                .as_ref()
+                .map(|t| t.title.as_str())
+                .unwrap_or("No active task")
+        };
+        // 17 glyphs x 9 px is what fits between the divider and the right edge.
+        let (l1, l2) = split_two_lines(title, 17);
         draw_text(canvas, rx, y, l1, Font::F8x14, INK);
         y += 20;
         if !l2.is_empty() {
@@ -87,6 +108,8 @@ pub fn render(
             let a = fmt_u32(&mut s1, task.step.clamp(0, 9999) as u32);
             let b = fmt_u32(&mut s2, task.max_steps.clamp(0, 9999) as u32);
             super::fmt_into(&mut step_buf, &["Step ", a, "/", b])
+        } else if offline {
+            "Offline"
         } else {
             "Idle"
         };
@@ -94,8 +117,15 @@ pub fn render(
         y += 14;
 
         let last = if last_tool.is_empty() { "-" } else { last_tool };
-        draw_text(canvas, rx, y, "last", Font::F6x8, INK);
-        draw_text(canvas, rx + 24, y, last, Font::F6x8, ACCENT_BLUE);
+        draw_text(canvas, rx, y, "last:", Font::F6x8, INK);
+        draw_text(
+            canvas,
+            rx + 30,
+            y,
+            clip(last, VALUE_CHARS),
+            Font::F6x8,
+            ACCENT_BLUE,
+        );
         y += 14;
 
         let next = if daemon.next_cron.is_empty() {
@@ -104,14 +134,8 @@ pub fn render(
             daemon.next_cron.as_str()
         };
         draw_text(canvas, rx, y, "next:", Font::F6x8, INK);
-        draw_text(canvas, rx + 30, y, next, Font::F6x8, INK);
+        draw_text(canvas, rx + 30, y, clip(next, VALUE_CHARS), Font::F6x8, INK);
     }
-
-    // Blink dot in the clock if idle and blink phase (matches mascot blink).
-    if header.state == MascotState::Idle && anim.blink {
-        canvas.fill_rect(30, 44, 3, 3, ACCENT_BLUE);
-    }
-    let _ = now;
 }
 
 /// Splits `text` into at most two slices of `<= max_chars` without allocating.
@@ -155,4 +179,15 @@ fn fmt_u32(buf: &mut [u8; 10], mut v: u32) -> &str {
         v /= 10;
     }
     std::str::from_utf8(&buf[i..]).unwrap_or("0")
+}
+
+/// Glyphs (6 px each) that fit after the `last:` / `next:` labels.
+const VALUE_CHARS: usize = 21;
+
+/// `s` cut to at most `max` characters, on a character boundary.
+fn clip(s: &str, max: usize) -> &str {
+    match s.char_indices().nth(max) {
+        Some((idx, _)) => &s[..idx],
+        None => s,
+    }
 }

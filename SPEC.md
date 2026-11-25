@@ -347,6 +347,64 @@ Local Unix Domain Socket (`SOCK_STREAM`) carrying **NDJSON** (one UTF-8 JSON obj
 
 Allowed `decision` values: `"approve_once"`, `"approve_session"`, `"deny"`.
 
+### 6.3 Control-Plane Additions (Android companion, pairing, mirroring)
+
+`state_sync` is a superset of the frame above (see `ANDROID_COMPANION_SPEC.md` 5.4 `State`): it also
+carries `action`, `tailscale_fqdn`, `battery_pct` (int or null), `battery_charging`,
+`utc_offset_min` (the device's local-time offset from UTC, which drives the desk clock and ticker
+timestamps), `pending_approvals`, `pairing`, `ui` and `device`. Clients ignore fields they do not
+know.
+
+Daemon -> UI:
+
+```json
+{"type":"state_sync","agent_state":"ACTING","action":"ssh_exec","active_host":"macbook-pro","active_task":{"id":"t_01","title":"Check CI logs","step":4,"max_steps":25}}
+{"type":"task_finished","task_id":"t_01","chat_id":"c_5f2a9c1e","host":"macbook-pro","status":"done","summary":"CI is green; the worker was restarted."}
+{"type":"approval_resolved","request_id":"req_99","decision":"approve_once","by":"android:Pixel"}
+{"type":"pairing","mode":"pin","pin":"482917","device_name":"LapisZero-4F2A","status":"waiting","expires_in":300,"expires_at":1795438564}
+{"type":"pairing","mode":"qr","payload":"lapis://pair?host=lapis-zero.tailnet.ts.net&nonce=...&pin=482917","host":"lapis-zero.tailnet.ts.net","pin":"482917","expires_in":180,"expires_at":1795438444}
+{"type":"pairing","mode":"off"}
+{"type":"ui_settings","theme":"dark","brightness":80,"mute_audio":false,"wake":true}
+{"type":"screen_request","id":"a1b2c3d4"}
+```
+
+* `action` (a string in every `state_sync`) is what the agent is doing on the host right now: the
+  `kind` of the step that is being executed (`screenshot`, `wait`, `ssh_exec`, `agent_run`,
+  `vnc_click`, `vnc_move`, `vnc_drag`, `vnc_scroll`, `type_text`, `vnc_key`), and `""` when no
+  step is. It is non-empty only together with `agent_state: "ACTING"`. A frame is sent when a
+  step starts and when it has returned (`ACTING` with `""`, just before that step's
+  `activity_event`), so a screen can show a fetch or a command while it happens;
+  `activity_event` reports a step only afterwards. A daemon from before this field sends no
+  `action`: treat a missing field as "not reported", not as `""`.
+* `task_finished` is sent once for every task that ends, directly after the `state_sync` that
+  shows `agent_state: "IDLE"` and `active_task: null`. `status` is `done`, `failed` (`summary`
+  says why), `stopped` (the step limit) or `cancelled` (the kill switch, a stopped chat, a denied
+  action that ended the task); `chat_id` is null for a task without a chat. `summary` is the
+  closing sentence, up to 16000 characters for the answer of an agent tool. After the kill
+  switch a `toast` of level `warn` follows; like the summary it says what the host confirmed:
+  `Kill switch: all agent activity stopped`, or that something `may still be running on <host>`
+  (`ANDROID_COMPANION_SPEC.md` 5.5). A daemon from before this change sends `task_finished` to
+  WebSocket clients only, and a daemon that sends `action` also sends `task_finished` here.
+* `approval_resolved` dismisses the matching modal when the decision was made elsewhere (the phone
+  or the kill switch). `approval_request` also carries `task_id`, `chat_id`, `step`,
+  `screenshot_id`, `click_x`, `click_y`; `action` may be `vnc_click`, `vnc_type`, `vnc_key` or `ssh_exec`.
+* `pairing` shows View 7 (`pairing_pin` / `pairing_qr`); `mode: "off"` returns to the previous view.
+  `status` for `pin` mode: `waiting`, `connected`, `verified`, `wifi`, `tailscale`, `done`, `locked`.
+* `ui_settings`: `theme` `"dark"` swaps INK and PAPER; `brightness` is a percentage of the panel's
+  maximum; `wake: true` resets the idle timer.
+
+UI -> Daemon:
+
+```json
+{"type":"pairing_control","command":"start"}
+{"type":"pairing_control","command":"stop"}
+{"type":"screen_snapshot","id":"a1b2c3d4","png_b64":"<base64 PNG of the current 320x170 frame>"}
+```
+
+Other local clients (the on-demand `lapis-ble-prov` service) use the same socket:
+`{"type":"pairing_event","mode":"pin"|"off", ...}` (rebroadcast as `pairing`),
+`{"type":"reload_secrets"}` and `{"type":"refresh_status"}`.
+
 ---
 
 ## 7. Software Agent KVM & Daemon Specification (`lapis-daemon`, Python)
@@ -370,7 +428,7 @@ Allowed `decision` values: `"approve_once"`, `"approve_session"`, `"deny"`.
 5. **HID Safety:** Track held modifier keys; on abort or `kill_all`, transmit explicit key-up events for all held modifiers before closing.
 
 #### `SshDriver` (`kvm/ssh_driver.py`)
-* Non-interactive command execution via `asyncssh` with strict timeout ($30\text{ s}$) and combined `stdout`+`stderr` truncation to $4096\text{ bytes}$.
+* Non-interactive command execution via `asyncssh` with strict timeout ($30\text{ s}$) and combined `stdout`+`stderr` truncation to $4096\text{ bytes}$. The output is read as it arrives and only that head is ever held in memory. At the timeout, and on `kill_all`, the remote command is stopped before the call returns (`TERM`, a second of grace, `KILL`); if the host does not confirm that, the result and the kill switch say that it may still be running.
 
 ### 7.3 Agent Tools, Safety Policy & Persistence
 

@@ -1,0 +1,10 @@
+# Lapis-Zero: only what the image build enabled may run.
+#
+# The image ships /etc/machine-id=uninitialized, so systemd applies presets on
+# the first boot, and Debian's default policy is "enable": every installed unit
+# with an [Install] section (sshd, adbd on tcp/5555, systemd-networkd and its
+# 120 s wait-online, apt timers...).  On the device that pass finds / still
+# read-only and does nothing; in a container, or if the boot ever mounts / rw
+# first, it would switch all of that on.  This makes the outcome the same
+# everywhere.
+disable *

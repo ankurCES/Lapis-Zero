@@ -27,7 +27,7 @@ def dhash_from_image(image: Image.Image, size: int = 8) -> int:
     from PIL import Image as PILImage
 
     gray = image.convert("L").resize((size + 1, size), resample=PILImage.Resampling.LANCZOS)
-    px = list(gray.getdata())
+    px = list(gray.tobytes())  # mode L: one byte per pixel, row-major
     rows = [px[y * (size + 1) : (y + 1) * (size + 1)] for y in range(size)]
     return dhash_from_gray([list(r) for r in rows], size)
 

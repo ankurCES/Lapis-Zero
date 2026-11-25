@@ -12,18 +12,14 @@ LAPIS_DAEMON_WHEEL ?=
 build: deploy
 
 deploy:
-	./build-image.sh
+	bash ./build-image.sh
 
 lint:
 	shellcheck build-image.sh \
-		stage-lapis/files/lapis-firstboot.sh \
-		stage-lapis/files/lapis-powerguard.sh \
+		stage-lapis/files/*.sh \
 		stage-lapis/files/st7789-firmware \
 		stage-lapis/prerun.sh \
-		stage-lapis/00-os-tuning/*.sh \
-		stage-lapis/01-tailscale/*.sh \
-		stage-lapis/02-lapis-stack/*.sh \
-		stage-lapis/03-services-firstboot/*.sh
+		stage-lapis/*/*.sh
 	python3 generate-imager-manifest.py --self-test
 
 manifest:

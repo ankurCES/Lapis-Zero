@@ -1,0 +1,16 @@
+[Unit]
+Description=Lapis-Zero boot report for a boot that never reaches timers.target
+# Like lapis-ui: independent of sysinit.target, so a boot that stalls there (it
+# happened once, behind cloud-init) still leaves a report on the card.
+DefaultDependencies=no
+After=local-fs.target
+RequiresMountsFor=/boot/firmware
+Conflicts=shutdown.target
+Before=shutdown.target
+
+[Service]
+Type=simple
+ExecStart=/bin/sh -c 'sleep 75; systemctl is-active --quiet timers.target || exec /usr/lib/lapis/lapis-bootreport.sh'
+
+[Install]
+WantedBy=multi-user.target
