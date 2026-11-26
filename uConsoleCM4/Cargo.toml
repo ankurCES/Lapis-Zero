@@ -1,0 +1,39 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[workspace.lints.clippy]
+# AGENTS.md 2: no unwrap()/expect() in production paths (clippy.toml allows them in tests).
+unwrap_used = "deny"
+expect_used = "deny"
+
+[workspace.dependencies]
+lapis-crypto = { path = "crates/lapis-crypto" }
+lapis-sdr = { path = "crates/lapis-sdr" }
+lapis-daemon = { path = "crates/lapis-daemon" }
+aes-gcm = "0.10"
+anyhow = "1"
+base64 = "0.22"
+hex = "0.4"
+hkdf = "0.12"
+hmac = "0.12"
+rand_core = { version = "0.6", features = ["getrandom"] }
+regex = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+subtle = "2"
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 4
+strip = true

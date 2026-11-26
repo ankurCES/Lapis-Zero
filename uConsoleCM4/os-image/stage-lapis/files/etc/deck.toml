@@ -1,0 +1,36 @@
+# Lapis-Deck daemon configuration. Every value shown is the default.
+
+wifi_iface = "wlan0"
+gpsd = "127.0.0.1:2947"
+meshtasticd = "127.0.0.1:4403"
+# LoRa region the daemon sets on meshtasticd: US, EU_868, EU_433, ANZ, IN, JP, KR, ... (the
+# RegionCode names in Meshtastic's config.proto). A new radio has none and does not transmit.
+# Empty: leave the radio's own setting alone. Must match the band of your AIO board's radio.
+mesh_region = ""
+
+[rails]
+# HackerGadgets AIO board: "v2" (switchable rails), "v1" (always on) or "none".
+board = "v2"
+gps_pin = 27
+lora_pin = 16
+sdr_pin = 7
+usb_hub_pin = 23
+lte_command = "uconsole-4g-cm4"
+bias_tee_command = "rtl_biast"
+
+[policy]
+# A pending approval nobody answers is denied after this many seconds.
+approval_timeout_s = 600
+extra_denylist = []
+
+[pty]
+user = "lapis"
+max_timeout_s = 120
+
+[sdr]
+# auto | synthetic | rtl_sdr | soapy
+source = "auto"
+sample_rate = 2048000
+fft_size = 1024
+gain_db = 30.0
+center_hz = 100000000

@@ -1,0 +1,42 @@
+[package]
+name = "lapis-daemon"
+description = "Lapis-Deck control plane: 127.0.0.1:8421 REST/WS, bearer auth, Policy Gate, BLE provisioning, hardware"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = []
+# BlueZ GATT peripheral for lapis-ble-v1 provisioning (Linux, needs libdbus-1-dev to build).
+bluez = ["dep:bluer"]
+
+[dependencies]
+lapis-crypto.workspace = true
+lapis-sdr.workspace = true
+anyhow.workspace = true
+axum = { version = "0.8", features = ["ws"] }
+base64.workspace = true
+futures-util = "0.3"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+prost = "0.13"
+regex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serialport = { version = "4", default-features = false }
+thiserror.workspace = true
+tokio.workspace = true
+tokio-tungstenite = "0.26"
+toml = "0.8"
+tracing.workspace = true
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+bluer = { version = "0.17", features = ["bluetoothd"], optional = true }
+
+[dev-dependencies]
+tempfile = "3"

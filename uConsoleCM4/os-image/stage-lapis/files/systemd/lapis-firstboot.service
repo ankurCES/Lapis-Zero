@@ -1,0 +1,12 @@
+[Unit]
+Description=Lapis-Deck: radios on, first-boot seed import from /boot/firmware/lapis-seed
+After=local-fs.target
+Before=lapis-daemon.service lapis-tailscale-up.service NetworkManager.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=true
+ExecStart=/usr/lib/lapis/lapis-firstboot.sh
+
+[Install]
+WantedBy=multi-user.target

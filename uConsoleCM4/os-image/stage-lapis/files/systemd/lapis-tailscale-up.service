@@ -1,0 +1,14 @@
+[Unit]
+Description=Lapis-Deck: join the tailnet (seeded key) and serve 127.0.0.1:8421 over tailnet HTTPS
+After=tailscaled.service network-online.target lapis-firstboot.service
+Wants=tailscaled.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/lapis/lapis-tailscale-up.sh
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target

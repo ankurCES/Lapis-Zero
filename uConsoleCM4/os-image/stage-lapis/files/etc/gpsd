@@ -1,0 +1,5 @@
+# gpsd for the AIO board GPS on /dev/ttyS0 (9600 baud) with PPS on GPIO6 (/dev/pps0).
+START_DAEMON="true"
+DEVICES="/dev/ttyS0 /dev/pps0"
+GPSD_OPTIONS="-n -s 9600"
+USBAUTO="true"

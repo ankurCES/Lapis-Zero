@@ -943,7 +943,7 @@ Ripgrep warnings (also as the step line).
 - Seen once, not addressed: Gemini's own `response` began with leaked model reasoning
   ("...thought / CRITICAL INSTRUCTION 1"); the run before was clean.
 
-### Image 0.3.3 (built 2026-11-25, not yet flashed)
+### Image 0.3.3 (built 2026-11-25, flashed the same day)
 
 | File | Bytes | SHA-256 |
 |---|---|---|
@@ -953,3 +953,10 @@ Ripgrep warnings (also as the step line).
 
 0.3.2 moved to `os/deploy/previous/`. In the image: daemon wheel 0.3.3 with both changes,
 `lapis-ui` unchanged from 0.3.2 (`fac4d78e...`).
+
+Flashed with `dd` to the same 1 TB card (75 s, 71 MB/s) and checked part by part: the partition
+table (sector 0) and the system partition (4 MiB blocks 130..1279) match the image byte for byte,
+and the boot partition file by file (445 files each, macOS's own folders left out). The card's
+boot partition is readable only by root, so it is mounted with `diskutil mount readOnly`, not
+`mount -t msdos`. On the device after re-pairing (2026-11-25): Claude Code and Gemini CLI chats on
+cut-mac-002 both answer cleanly, with no `/login` error and no terminal warnings.

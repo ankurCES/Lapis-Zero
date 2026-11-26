@@ -1,0 +1,15 @@
+[package]
+name = "lapis-sdr"
+description = "SDR runtime: IQ sources (RTL-SDR, SoapySDR, synthetic), FFT spectrum + waterfall, demodulators, decoder adapters"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+rustfft = "6"
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true

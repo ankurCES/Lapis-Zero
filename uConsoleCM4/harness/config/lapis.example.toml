@@ -1,0 +1,144 @@
+# Lapis-Deck — Agent Harness Configuration Example (lapis-harness)
+#
+# Installation:
+#   Copy this file to /etc/lapis/lapis.toml on the uConsole (or pass --config DIR).
+#
+# Security:
+#   NEVER store API keys, VNC passwords, or Tailscale auth keys in this file.
+#   All secrets belong exclusively in /etc/lapis/secrets.env (chmod 600).
+
+[api]
+# Remote control plane for the Android companion app. It always binds to
+# 127.0.0.1 and is reachable only through `tailscale serve` (HTTPS on the tailnet).
+enabled = true
+port = 8421
+
+# Disk cap (MB) for recent agent screenshots kept under /var/lib/lapis/frames.
+frames_cap_mb = 25
+
+[llm]
+# LLM Computer Use provider: "anthropic" | "openai" | "openrouter".
+provider = "anthropic"
+
+# Model identifier sent to the configured provider.
+model = "claude-sonnet-5-5"
+
+# Environment variable name in /etc/lapis/secrets.env holding the API key.
+api_key_env = "ANTHROPIC_API_KEY"
+
+# Thinking depth / token spend per turn: "low" | "medium" | "high" | "xhigh" | "max".
+effort = "medium"
+
+# OpenAI-compatible endpoint override ("openai" / "openrouter" providers only).
+base_url = ""
+
+# Maximum agent tool-call steps permitted per task before halting.
+max_steps = 25
+
+# HTTP request timeout (seconds) for each LLM turn.
+request_timeout_sec = 120
+
+[kvm]
+# Maximum screenshot dimensions sent to the LLM (aspect ratio preserved) to stay
+# within the device's RAM budget.
+llm_max_width = 1280
+llm_max_height = 720
+
+# JPEG compression quality (1-100) for downscaled screenshots (~60-110 KB).
+jpeg_quality = 75
+
+# Disconnect idle on-demand VNC sessions after this many seconds.
+vnc_idle_disconnect_sec = 60
+
+# Stuck-loop detector: consecutive mutating actions producing near-identical
+# 64-bit dHash frames (Hamming distance <= stuck_hamming_max) trigger a hint.
+stuck_threshold = 3
+stuck_hamming_max = 2
+
+# Non-interactive SSH command timeout (seconds) and combined output byte cap.
+ssh_timeout_sec = 30
+ssh_output_truncate = 4096
+
+# Longest time (seconds, 10 to 14400) one chat message may keep an agent tool on a host
+# (Claude Code, opencode, Freya ...) at work before it is stopped. `llm.max_steps` does
+# not apply to those runs.
+agent_run_timeout_sec = 1800
+
+[voice]
+# Enable ALSA Push-to-Talk microphone capture and STT transcription (Phase 6).
+enabled = false
+
+# ALSA capture format for the uConsole headset microphone.
+sample_rate = 16000
+channels = 1
+
+# ALSA capture device ("default" or an explicit ALSA hw device).
+capture_device = "default"
+
+# OpenAI-compatible STT endpoint, e.g. "http://100.x.y.z:8080/v1/audio/transcriptions".
+# Empty disables network STT and uses the built-in fake transcript (mock/dev).
+stt_api_url = ""
+
+# STT model name sent to the endpoint.
+stt_model = "whisper-1"
+
+# Environment variable in /etc/lapis/secrets.env holding the STT API key.
+stt_api_key_env = "OPENAI_API_KEY"
+
+# HTTP timeout for each STT request (seconds).
+stt_timeout_sec = 30
+
+# Play procedural 8-bit audio cues (start/stop/ok/error) over ALSA.
+audio_cues = true
+
+# Hard ceiling on buffered raw PCM while PTT is held (bytes); ~0.5 MB ≈ 16 s.
+max_capture_bytes = 524288
+
+[ui]
+# Display palette theme: "paper" (light e-paper) | "dark" (inverted).
+theme = "paper"
+
+# Display backlight as a percentage of the panel maximum, and UI chime mute.
+brightness = 100
+mute_audio = false
+
+# Adaptive frame governor rates (FPS) for battery and CPU conservation.
+frame_fps_active = 60
+frame_fps_agent = 12
+frame_fps_idle = 1
+
+[security]
+# Default approval policy tier when a host does not override it:
+# "strict" | "balanced" | "autonomous".
+approval_default_tier = "balanced"
+
+# Agent command-line tools on the hosts that a chat can be handed to, besides the
+# built-in ones (claude, opencode, freya, codex, gemini, cursor): one table per tool,
+# named by an id of lowercase letters, digits, _ or -.
+#   name     shown in the app's picker
+#   command  the program and its arguments (no shell syntax), with {prompt} once as a
+#            whole word where the owner's message goes
+#   tiers    the host policies under which this command line may be run. A tool in a
+#            chat is not put up for approval step by step, and all the device knows of
+#            this one is the line above: so only "autonomous", unless you list "strict"
+#            or "balanced" here and with that vouch that the line as written keeps the
+#            tool within them. Under any other policy the tool is not started.
+# [agents.aider]
+# name = "Aider"
+# command = "aider --yes --message {prompt}"
+# tiers = ["autonomous"]
+
+[cron]
+# Enable the asyncio background cron scheduler.
+enabled = true
+
+# Example scheduled job (set enabled = true to activate).
+[[cron.schedules]]
+name = "Daily Digest"
+# Standard 5-field cron expression (minute hour day-of-month month day-of-week).
+schedule = "0 8 * * *"
+# Target host key from /etc/lapis/hosts.toml.
+host = "macbook-pro"
+# Natural-language task prompt queued when the schedule triggers.
+prompt = "Check overnight CI runs and summarize any failures."
+enabled = false

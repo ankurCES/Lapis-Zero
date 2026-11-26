@@ -1,0 +1,4 @@
+# /etc/lapis/hosts.toml — Tailscale target machines.
+# Empty by default: add hosts from the Android app (Config -> Hosts) or seed
+# this file via /boot/firmware/lapis-seed/hosts.toml.
+# The companion app and the HUD (FLEET) manage it.

@@ -1,0 +1,144 @@
+{
+  "version": 1,
+  "note": "Shared by lapis-crypto::redact (Rust) and lapis_harness.redact (Python). Edit the rules in both, then this file.",
+  "text_cases": [
+    {
+      "input": "ANTHROPIC_API_KEY=sk-ant-api03-abcdefghijklmnopqrstuvwxyz",
+      "expected": "ANTHROPIC_API_KEY=[REDACTED]"
+    },
+    {
+      "input": "Authorization: Bearer abcdefghijklmnop1234",
+      "expected": "Authorization: Bearer [REDACTED]"
+    },
+    {
+      "input": "join with tskey-auth-kAbCdEf123456-XYZxyz789 now",
+      "expected": "join with [REDACTED] now"
+    },
+    {
+      "input": "{\"cmd\":\"wifi_connect\",\"ssid\":\"Home\",\"psk\":\"hunter2hunter2\"}",
+      "expected": "{\"cmd\":\"wifi_connect\",\"ssid\":\"Home\",\"psk\":\"[REDACTED]\"}"
+    },
+    {
+      "input": "password_env = LAPIS_VNC_PASSWORD",
+      "expected": "password_env = LAPIS_VNC_PASSWORD"
+    },
+    {
+      "input": "max_tokens: 4096",
+      "expected": "max_tokens: 4096"
+    },
+    {
+      "input": "pem: -----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAA\n-----END OPENSSH PRIVATE KEY-----\ndone",
+      "expected": "pem: [REDACTED PRIVATE KEY]\ndone"
+    },
+    {
+      "input": "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA",
+      "expected": "[REDACTED PRIVATE KEY]"
+    },
+    {
+      "input": "OPENAI_API_KEY='sk-proj-ABCDEFGHIJKLMNOPQRSTUV'",
+      "expected": "OPENAI_API_KEY='[REDACTED]'"
+    },
+    {
+      "input": "gemini key AIzaSyA1234567890abcdefghijklmnopqrstu",
+      "expected": "gemini key [REDACTED]"
+    },
+    {
+      "input": "pushed ghp_abcdefghijklmnopqrstuvwxyz0123456789 ok",
+      "expected": "pushed [REDACTED] ok"
+    },
+    {
+      "input": "no secrets here: uname -a",
+      "expected": "no secrets here: uname -a"
+    },
+    {
+      "input": "{\"authkey\":null}",
+      "expected": "{\"authkey\":null}"
+    },
+    {
+      "input": "api_token=\"\"",
+      "expected": "api_token=\"\""
+    },
+    {
+      "input": "TS_AUTHKEY=abc123def456 wifi_psk: s3cr3t-pass",
+      "expected": "TS_AUTHKEY=[REDACTED] wifi_psk: [REDACTED]"
+    },
+    {
+      "input": "curl -H 'authorization: basic dXNlcjpwYXNzd29yZA=='",
+      "expected": "curl -H 'authorization: basic [REDACTED]'"
+    }
+  ],
+  "json_cases": [
+    {
+      "input": {
+        "cmd": "push_secrets",
+        "secrets": {
+          "ANTHROPIC_API_KEY": "sk-ant-api03-abcdefghijklmnop",
+          "OTHER": "plain"
+        }
+      },
+      "expected": {
+        "cmd": "push_secrets",
+        "secrets": {
+          "ANTHROPIC_API_KEY": "[REDACTED]",
+          "OTHER": "plain"
+        }
+      }
+    },
+    {
+      "input": {
+        "evt": "pin_verified",
+        "api_token": "Zm9vYmFyYmF6cXV4",
+        "device_id": "dev_01"
+      },
+      "expected": {
+        "evt": "pin_verified",
+        "api_token": "[REDACTED]",
+        "device_id": "dev_01"
+      }
+    },
+    {
+      "input": {
+        "type": "toast",
+        "text": "auth failed for Bearer abcdefghijklmnop"
+      },
+      "expected": {
+        "type": "toast",
+        "text": "auth failed for Bearer [REDACTED]"
+      }
+    },
+    {
+      "input": {
+        "tailscale": {
+          "authkey": null
+        },
+        "n": [
+          1,
+          "tskey-auth-abcdefgh12"
+        ]
+      },
+      "expected": {
+        "tailscale": {
+          "authkey": null
+        },
+        "n": [
+          1,
+          "[REDACTED]"
+        ]
+      }
+    },
+    {
+      "input": {
+        "password": 12345678,
+        "password_env": "LAPIS_VNC_PASSWORD",
+        "max_tokens": 4096,
+        "secret": ""
+      },
+      "expected": {
+        "password": "[REDACTED]",
+        "password_env": "LAPIS_VNC_PASSWORD",
+        "max_tokens": 4096,
+        "secret": ""
+      }
+    }
+  ]
+}

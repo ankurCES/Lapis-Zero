@@ -1,0 +1,20 @@
+[Unit]
+Description=Lapis-Deck agent harness (chats, fleet KVM, remote CLI harnesses, LLM providers)
+After=lapis-daemon.service network.target
+Wants=lapis-daemon.service
+
+[Service]
+User=lapis
+Group=lapis
+RuntimeDirectory=lapis
+RuntimeDirectoryMode=0750
+ExecStart=/opt/lapis/harness/bin/lapis-harness --socket /run/lapis/harness.sock --daemon-url http://127.0.0.1:8421 --token-file /var/lib/lapis/local.token --state-dir /var/lib/lapis/harness --config /etc/lapis
+Restart=always
+RestartSec=2
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/lapis/harness /etc/lapis /run/lapis
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,14 @@
+# /etc/lapis/lapis.toml — Lapis-Deck harness defaults shipped in the image.
+# Every key is optional; the companion app edits it (Config).
+# Secrets never go here: they live in /etc/lapis/secrets.env (0600).
+
+[llm]
+provider = "anthropic"
+api_key_env = "ANTHROPIC_API_KEY"
+max_steps = 25
+
+[voice]
+enabled = false
+
+[cron]
+enabled = true

@@ -1,0 +1,10 @@
+[Unit]
+Description=readsb ADS-B decoder (not enabled by default: it needs the dongle the waterfall uses)
+After=lapis-rails.service
+
+[Service]
+User=lapis
+RuntimeDirectory=readsb
+ExecStart=/usr/local/bin/readsb --device-type rtlsdr --gain auto --write-json /run/readsb --write-json-every 1 --quiet
+Restart=on-failure
+RestartSec=5

@@ -1,0 +1,12 @@
+# Build outputs
+.gradle/
+build/
+app/build/
+.kotlin/
+# Machine-specific
+local.properties
+# IDE
+.idea/
+*.iml
+captures/
+.cxx/

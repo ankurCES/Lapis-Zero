@@ -1,0 +1,14 @@
+[Unit]
+Description=Lapis-Deck: AIO board power rails at boot (GPS, LoRa, SDR, USB hub)
+Before=gpsd.service meshtasticd.service lapis-daemon.service
+DefaultDependencies=no
+# After the first-boot import: a seeded deck.toml may name the board revision.
+After=local-fs.target lapis-firstboot.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=true
+ExecStart=/usr/lib/lapis/lapis-rails.sh
+
+[Install]
+WantedBy=multi-user.target

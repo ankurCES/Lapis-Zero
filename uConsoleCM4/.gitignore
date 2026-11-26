@@ -1,0 +1,14 @@
+/target
+**/__pycache__/
+**/.venv/
+**/.pytest_cache/
+**/.mypy_cache/
+**/.ruff_cache/
+companion-android/.gradle/
+companion-android/**/build/
+companion-android/local.properties
+os-image/work/
+os-image/deploy/
+*.img
+*.img.xz
+.DS_Store

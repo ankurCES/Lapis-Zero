@@ -1,0 +1,23 @@
+#!/bin/sh
+# Stands in for an agent tool that is in the middle of a shell command of its own.
+# Claude Code and opencode start those the way Node's `detached: true` does: in a
+# session of their own, where no signal sent to the tool's session and no hang-up of its
+# terminal reaches them. The command stays the tool's child.
+#   $1  polite: the tool ends when it is asked to; stubborn: it and its command ignore that.
+#   $2  orphan: the command is started through a helper that exits at once, so it is
+#       nobody's child by the time anyone looks for it.
+# $HOME/python names a Python to do what sh cannot: start a session.
+[ "$1" = stubborn ] && trap '' TERM HUP INT
+py=$(cat "$HOME/python")
+work='echo $$ > "$HOME/child"; sleep 2; echo ran-on > "$HOME/AFTER_KILL"; sleep 300'
+if [ "$2" = orphan ]; then
+    "$py" -c 'import subprocess, sys
+subprocess.Popen(["/bin/sh", "-c", sys.argv[1]], start_new_session=True)' "$work"
+else
+    "$py" -c 'import os, sys
+os.setsid()
+os.execv("/bin/sh", ["sh", "-c", sys.argv[1]])' "$work" &
+fi
+echo "$$" > "$HOME/pids"
+echo started
+while :; do sleep 1; done

@@ -1,0 +1,24 @@
+# Lapis-Deck — pi-gen configuration (sourced by pi-gen's build.sh inside the build container).
+# Base: ak-rex/ClockworkPi-pi-gen (trixie, akrex-kernel, uConsole CM4 overlays) stages 0-2
+# (headless "lite"), then stage-lapis. No desktop stages: no X11, no Wayland, no display manager.
+
+IMG_NAME=lapis-deck-cm4-trixie-arm64
+IMG_DATE=${IMG_DATE:-$(date +%Y-%m-%d)}
+RELEASE=trixie
+STAGE_LIST="stage0 stage1 stage2 stage-lapis"
+
+DEPLOY_COMPRESSION=xz
+COMPRESSION_LEVEL=6
+
+TARGET_HOSTNAME=lapis-deck
+LOCALE_DEFAULT=en_US.UTF-8
+KEYBOARD_KEYMAP=us
+KEYBOARD_LAYOUT="English (US)"
+TIMEZONE_DEFAULT=Etc/UTC
+
+# The services' account. build.sh appends a random throwaway FIRST_USER_PASS (pi-gen requires
+# one with the rename disabled) and stage-lapis locks the account: nobody logs in with a
+# password; the HUD owns tty1. Remote shell = Tailscale SSH (tailnet ACLs).
+FIRST_USER_NAME=lapis
+DISABLE_FIRST_BOOT_USER_RENAME=1
+ENABLE_SSH=0

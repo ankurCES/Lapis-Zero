@@ -1,0 +1,4 @@
+# Lapis-Deck: only what the image build enabled may run. The image ships an uninitialised
+# machine-id, so systemd applies presets on the first boot, and Debian's default policy is
+# "enable" (sshd, wait-online, apt timers...). This keeps the build's choices.
+disable *

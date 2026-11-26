@@ -1,0 +1,39 @@
+{
+  "version": 1,
+  "chunk_framing_vector": {
+    "att_mtu": 23,
+    "max_chunk_data": 16,
+    "msg_id": 7,
+    "flags": 1,
+    "payload_hex": "000102030405060708090a0b0c0d0e0f10111213",
+    "expected_frames_hex": [
+      "07000201000102030405060708090a0b0c0d0e0f",
+      "0701020110111213"
+    ]
+  },
+  "crypto_vector": {
+    "proto_ver": 1,
+    "pin": "482917",
+    "client_priv_hex": "77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a",
+    "client_pub_hex": "8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a",
+    "device_priv_hex": "5dab087e624a8a4b79e17f8b83800ee66f3bb1292618b6fd1c2f8b27ff88e0eb",
+    "device_pub_hex": "de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f",
+    "shared_secret_hex": "4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742",
+    "client_nonce_hex": "000102030405060708090a0b0c0d0e0f",
+    "device_nonce_hex": "f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff",
+    "seq": 1,
+    "dir_byte": 1,
+    "plaintext_utf8": "{\"cmd\":\"wifi_scan\"}",
+    "derived": {
+      "salt_hex": "999feb0c7ed27c013aa118aa6af8cec96c259d52d5c568085cbe894f0535d4d5",
+      "k_c2d_hex": "c302d047fe9ee3b34da04c88a23dfdebb6b60aff9b07859bdcb867859203bbb4",
+      "k_d2c_hex": "46eeb24e3ebf10820156043a75bdb171c42e86c79a42ba63abd6b372217d9c3e",
+      "k_pin_hex": "a7056bb1b464657336a38831cb1e6f3cf5e9c50b59f2028b539a62f75a3552b6",
+      "client_proof_hex": "cd09d63608941540010c620599c542a0782c6a491d5d32d339c728907aa9cc56",
+      "server_proof_hex": "fc7799725157ebf61c1d86a0168575a69186217997b61183bbea82611e21a943",
+      "nonce_hex": "010000000000000000000001",
+      "aad_hex": "010100000001",
+      "envelope_hex": "00000001ea84c7dc7c23e0dafd7c51250183d07a0c49218ed89665e66106c296ddf79a8263431d"
+    }
+  }
+}

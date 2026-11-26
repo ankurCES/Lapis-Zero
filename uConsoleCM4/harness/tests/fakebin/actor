@@ -1,0 +1,38 @@
+#!/bin/sh
+# Stands in for agent tools that misbehave; the message it is given says how.
+case $1 in
+fail)
+    echo 'reading the repo'
+    echo 'no API key' >&2
+    exit 3
+    ;;
+chatty)
+    for i in 1 2 3 4 5 6; do
+        printf '\033[2mstep %s\033[0m\n' $i
+        sleep 0.03
+    done
+    echo 'the answer'
+    ;;
+flood) # 300 KB in lines of 999 characters
+    head -c 300000 /dev/zero | tr '\0' x | fold -w 999
+    echo
+    echo 'THE END'
+    ;;
+polite) # works with a child of its own until it is asked to stop, and notes that it was
+    trap 'echo asked > "$HOME/asked"; exit 0' TERM
+    sleep 300 &
+    echo "$$ $!" > "$HOME/pids"
+    echo started
+    wait
+    ;;
+stubborn) # refuses to be asked: only a kill ends it and its child
+    trap '' TERM HUP INT
+    sleep 300 &
+    echo "$$ $!" > "$HOME/pids"
+    echo started
+    while :; do sleep 1; done
+    ;;
+*)
+    echo "said: $*"
+    ;;
+esac

@@ -1,0 +1,30 @@
+[Unit]
+Description=Lapis-Deck HUD (DRM/KMS on the DSI panel, evdev input; no X11, no Wayland)
+After=lapis-daemon.service systemd-user-sessions.service plymouth-start.service
+# The boot splash stays up until the HUD takes the screen, not until plymouth-quit runs.
+Before=plymouth-quit.service
+Wants=lapis-daemon.service
+Conflicts=getty@tty1.service
+# Keep trying: at boot the panel driver may come up late, and a start limit would leave the
+# screen blank for good.
+StartLimitIntervalSec=0
+
+[Service]
+User=lapis
+Group=lapis
+SupplementaryGroups=video render input dialout tty
+# Plymouth (the boot splash) holds the DRM card until told to go; its last frame stays on
+# screen until the HUD's first. Root only ("+"); no plymouthd (a restart) is fine ("-").
+ExecStartPre=-+/usr/bin/plymouth quit --retain-splash
+# Then the first opener of the DRM card becomes its master; nothing else ever opens it here.
+ExecStart=/usr/local/bin/lapis-ui --backend kms
+Environment=HOME=/var/lib/lapis/harness
+Restart=always
+RestartSec=3
+TTYPath=/dev/tty1
+StandardInput=null
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

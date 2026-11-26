@@ -1,0 +1,7 @@
+gpsd gpsd-clients pps-tools chrony
+rtl-sdr rtl-433 multimon-ng hackrf airspy
+soapysdr-tools soapysdr0.8-module-rtlsdr soapysdr0.8-module-hackrf soapysdr0.8-module-airspy
+tcpdump nmap iw rfkill bluez alsa-utils network-manager curl ca-certificates gnupg
+plymouth
+python3-venv python3-pip python3-pydantic python3-pil python3-cryptography
+libgbm1 libegl1 libegl-mesa0 libgles2 libgl1-mesa-dri libdrm2 libdbus-1-3

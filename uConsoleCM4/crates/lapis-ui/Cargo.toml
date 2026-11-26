@@ -1,0 +1,38 @@
+[package]
+name = "lapis-ui"
+description = "Lapis-Deck 1280x720 cyberdeck HUD: DRM/KMS on the uConsole, a desktop window for host preview"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = ["desktop"]
+# Host development only (AGENTS.md invariant 1): a window via eframe/winit. Never in the image.
+desktop = ["dep:eframe"]
+# The device: DRM/KMS + GBM + EGL (GLES on VideoCore VI) and evdev input. Linux only.
+kms = ["dep:drm", "dep:gbm", "dep:glutin", "dep:raw-window-handle", "dep:glow", "dep:egui_glow", "dep:evdev"]
+
+[dependencies]
+base64.workspace = true
+egui = "0.31"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+portable-pty = "0.9"
+qrcode = { version = "0.14", default-features = false }
+serde_json.workspace = true
+serialport = { version = "4", default-features = false }
+tungstenite = "0.26"
+ureq = { version = "2", default-features = false }
+vt100 = "0.15"
+eframe = { version = "0.31", optional = true, default-features = false, features = ["glow", "default_fonts", "wayland"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+drm = { version = "0.14", optional = true }
+gbm = { version = "0.18", optional = true }
+glutin = { version = "0.32", optional = true, default-features = false, features = ["egl"] }
+raw-window-handle = { version = "0.6", optional = true }
+glow = { version = "0.16", optional = true }
+egui_glow = { version = "0.31", optional = true }
+evdev = { version = "0.13", optional = true }

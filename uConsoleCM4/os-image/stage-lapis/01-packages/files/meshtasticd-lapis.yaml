@@ -1,0 +1,16 @@
+# HackerGadgets uConsole AIO board: SX1262 on SPI1, CS = SPI1_CE0 (GPIO18) via
+# `dtoverlay=spi1-1cs` (00-system). Pins as printed in the vendor's setup guide, "Meshtastic
+# (LoRa) Setting": https://hackergadgets.com/pages/hackergadgets-uconsole-rtl-sdr-lora-gps-rtc-usb-hub-all-in-one-extension-board-setup-guide
+# Format: meshtasticd 2.7 merges /etc/meshtasticd/config.d/*.yaml over config.yaml, whose
+# `Module: auto` this overrides (firmware bin/config-dist.yaml, PortduinoGlue.cpp).
+# On a V2 board the LoRa rail (GPIO16) must be high first: lapis-rails, see the drop-in.
+# No GPS section: gpsd owns /dev/ttyS0. No Webserver section: no web UI; the deck talks to
+# meshtasticd on its TCP API (port 4403).
+Lora:
+  Module: sx1262
+  DIO2_AS_RF_SWITCH: true
+  DIO3_TCXO_VOLTAGE: true
+  IRQ: 26
+  Busy: 24
+  Reset: 25
+  spidev: spidev1.0

@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Lapis</string>
+    <string name="channel_approvals">Approval requests</string>
+    <string name="channel_approvals_desc">High-risk agent actions waiting for your decision</string>
+    <string name="channel_agent">Agent activity</string>
+    <string name="channel_agent_desc">Shown while an agent task is running</string>
+    <string name="approve_once">Approve once</string>
+    <string name="deny">Deny</string>
+    <string name="open_to_hold">Open to hold-approve</string>
+    <string name="kill_all">Kill all</string>
+    <string name="approval_title">%1$s on %2$s needs approval</string>
+    <string name="decision_failed">Decision was not delivered</string>
+    <string name="agent_running">Agent task running</string>
+    <string name="agent_running_step">%1$s · step %2$d of %3$d</string>
+</resources>

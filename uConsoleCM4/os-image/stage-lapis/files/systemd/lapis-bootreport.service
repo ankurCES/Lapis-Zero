@@ -1,0 +1,7 @@
+[Unit]
+Description=Lapis-Deck: write a boot report to the FAT partition (no console needed to diagnose)
+After=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/lapis/lapis-bootreport.sh

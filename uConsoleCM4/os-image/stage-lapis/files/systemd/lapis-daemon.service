@@ -1,0 +1,22 @@
+[Unit]
+Description=Lapis-Deck control plane (127.0.0.1:8421, Policy Gate, BLE provisioning, hardware)
+After=lapis-firstboot.service lapis-rails.service bluetooth.service
+Wants=bluetooth.service
+
+[Service]
+# Root for GPIO rails, rfkill, BlueZ GATT, NetworkManager and tailscale; files it creates are
+# group `lapis` (local.token 0640) so the HUD and the harness can read the local token.
+User=root
+Group=lapis
+UMask=0027
+ExecStart=/usr/local/bin/lapis-daemon --config /etc/lapis/deck.toml --state-dir /var/lib/lapis --harness-socket /run/lapis/harness.sock
+Restart=always
+RestartSec=2
+ProtectHome=read-only
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+NoNewPrivileges=false
+
+[Install]
+WantedBy=multi-user.target

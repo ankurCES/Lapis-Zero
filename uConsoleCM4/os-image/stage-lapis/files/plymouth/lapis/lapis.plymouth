@@ -1,0 +1,8 @@
+[Plymouth Theme]
+Name=Lapis-Deck
+Description=Lapis-Deck boot splash: the lapis gem, a breathing glow and a running light
+ModuleName=script
+
+[script]
+ImageDir=/usr/share/plymouth/themes/lapis
+ScriptFile=/usr/share/plymouth/themes/lapis/lapis.script
