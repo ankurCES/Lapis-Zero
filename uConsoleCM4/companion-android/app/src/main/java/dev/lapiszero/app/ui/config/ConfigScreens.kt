@@ -4,6 +4,7 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Intent
 import android.provider.Settings
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
@@ -22,6 +23,7 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -63,8 +65,11 @@ import dev.lapiszero.app.data.remote.ProbeResult
 import dev.lapiszero.app.data.remote.Schedule
 import dev.lapiszero.app.data.remote.ScheduleCreate
 import dev.lapiszero.app.data.remote.SecretStatus
+import dev.lapiszero.app.data.remote.DeviceKind
 import dev.lapiszero.app.domain.ChatRepository
+import dev.lapiszero.app.domain.HostSync
 import dev.lapiszero.app.domain.LapisSession
+import dev.lapiszero.app.domain.PairedDevice
 import dev.lapiszero.app.domain.SshSupport
 import dev.lapiszero.app.theme.LapisType
 import dev.lapiszero.app.theme.ThemeMode
@@ -106,19 +111,21 @@ fun NavGraphBuilder.configGraph(
     session: LapisSession,
     snackbar: SnackbarHostState,
     onOpenChat: (String) -> Unit,
+    /** Hosts on the other paired devices; null keeps the hosts screen to this device. */
+    sync: HostSync? = null,
 ) {
     composable(ConfigRoutes.MENU) { ConfigMenu(onOpen = { nav.navigate(it) }) }
-    composable(ConfigRoutes.HOSTS) { HostsScreen(configViewModel(session), snackbar) }
-    composable(ConfigRoutes.AGENT) { AgentScreen(configViewModel(session), snackbar) }
-    composable(ConfigRoutes.SECRETS) { SecretsScreen(configViewModel(session), snackbar) }
-    composable(ConfigRoutes.SCHEDULES) { SchedulesScreen(configViewModel(session), snackbar, session, onOpenChat) }
-    composable(ConfigRoutes.PHONES) { PhonesScreen(configViewModel(session), snackbar) }
+    composable(ConfigRoutes.HOSTS) { HostsScreen(configViewModel(session, sync), snackbar) }
+    composable(ConfigRoutes.AGENT) { AgentScreen(configViewModel(session, sync), snackbar) }
+    composable(ConfigRoutes.SECRETS) { SecretsScreen(configViewModel(session, sync), snackbar) }
+    composable(ConfigRoutes.SCHEDULES) { SchedulesScreen(configViewModel(session, sync), snackbar, session, onOpenChat) }
+    composable(ConfigRoutes.PHONES) { PhonesScreen(configViewModel(session, sync), snackbar) }
     composable(ConfigRoutes.APP) { AppScreen() }
 }
 
 @Composable
-private fun configViewModel(session: LapisSession): ConfigViewModel = viewModel(
-    factory = viewModelFactory { initializer { ConfigViewModel(session.api, session.repo) } },
+private fun configViewModel(session: LapisSession, sync: HostSync?): ConfigViewModel = viewModel(
+    factory = viewModelFactory { initializer { ConfigViewModel(session.api, session.repo, sync) } },
 )
 
 @Composable
@@ -183,7 +190,10 @@ private fun HostsScreen(vm: ConfigViewModel, snackbar: SnackbarHostState) {
         vm.loadDeviceKey()
     }
     var editing by remember { mutableStateOf<Pair<String?, Host>?>(null) }
+    var copying by remember { mutableStateOf(false) }
     var deleting by remember { mutableStateOf<String?>(null) }
+    // Read once per visit: pairing another device happens outside this screen.
+    val others = remember(vm) { vm.otherDevices() }
     var authorising by remember { mutableStateOf<String?>(null) }
     var showKey by remember { mutableStateOf(false) }
     // The device's own SSH key: present exactly when its software has the SSH features.
@@ -247,6 +257,16 @@ private fun HostsScreen(vm: ConfigViewModel, snackbar: SnackbarHostState) {
                 },
                 modifier = Modifier.fillMaxWidth(),
             ) { Text("Add host") }
+            if (others.isNotEmpty()) {
+                OutlinedButton(
+                    onClick = {
+                        vm.clearFailure()
+                        copying = true
+                        vm.loadOffers()
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                ) { Text("Copy hosts from another device") }
+            }
             Text(
                 "Hosts cannot be changed while a task is running.",
                 style = MaterialTheme.typography.bodySmall,
@@ -272,11 +292,20 @@ private fun HostsScreen(vm: ConfigViewModel, snackbar: SnackbarHostState) {
             support = support,
             saving = saving,
             error = failure,
-            onSave = { id, edited, vncPassword, sshPassword ->
-                vm.saveHost(originalId, id, edited, vncPassword, sshPassword) { ok -> if (ok) editing = null }
+            selfId = vm.selfId,
+            selfName = vm.selfName,
+            others = others,
+            onSave = { id, edited, vncPassword, sshPassword, targets ->
+                vm.saveHost(
+                    originalId, id, edited, vncPassword, sshPassword,
+                    alsoTo = targets - vm.selfId, here = vm.selfId in targets || others.isEmpty(),
+                ) { ok -> if (ok) editing = null }
             },
             onDismiss = { editing = null },
         )
+    }
+    if (copying) {
+        CopyHostsDialog(vm, saving = saving, error = failure, onDismiss = { copying = false })
     }
     authorising?.let { id ->
         AlertDialog(
@@ -409,9 +438,15 @@ private fun HostEditor(
     support: SshSupport,
     saving: Boolean,
     error: String?,
-    onSave: (String, Host, String?, String?) -> Unit,
+    selfId: String,
+    selfName: String,
+    /** Other paired devices the host can also be saved to; empty hides the choice. */
+    others: List<PairedDevice>,
+    onSave: (String, Host, String?, String?, Set<String>) -> Unit,
     onDismiss: () -> Unit,
 ) {
+    // Device ids to save to; this device is preselected.
+    var targets by remember { mutableStateOf(setOf(selfId)) }
     var id by rememberSaveable { mutableStateOf(originalId.orEmpty()) }
     var hostname by rememberSaveable { mutableStateOf(initial.hostname) }
     var tailscale by rememberSaveable { mutableStateOf(initial.tailscaleIp) }
@@ -551,6 +586,30 @@ private fun HostEditor(
                 }
                 sshHelp?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = lapis.muted) }
                 PlainField("Advanced: identity file on the device (optional)", identity, { identity = it.trim() })
+                if (others.isNotEmpty()) {
+                    SectionTitle("Save to")
+                    (listOf(selfId to "$selfName (this device)") + others.map { it.id to it.name }).forEach { (deviceId, name) ->
+                        val kind = others.firstOrNull { it.id == deviceId }?.kind?.let(DeviceKind::label).orEmpty()
+                        Row(
+                            Modifier.fillMaxWidth().clickable {
+                                targets = if (deviceId in targets) targets - deviceId else targets + deviceId
+                            },
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Checkbox(
+                                checked = deviceId in targets,
+                                onCheckedChange = { on -> targets = if (on) targets + deviceId else targets - deviceId },
+                            )
+                            Text(name, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+                            if (kind.isNotEmpty()) LapisBadge(kind, color = lapis.muted)
+                        }
+                    }
+                    Text(
+                        "Each device gets the host and the passwords typed here. Its own SSH features decide what it is sent.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = lapis.muted,
+                    )
+                }
                 // Shown here because a snackbar would sit behind this dialog.
                 if (error != null) {
                     Text(error, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
@@ -559,7 +618,7 @@ private fun HostEditor(
         },
         confirmButton = {
             Button(
-                enabled = valid && !saving,
+                enabled = valid && !saving && (others.isEmpty() || targets.isNotEmpty()),
                 onClick = {
                     onSave(
                         id,
@@ -574,9 +633,69 @@ private fun HostEditor(
                         vncPassword.ifEmpty { null },
                         // Only a password of the host's own: the shared one is the VNC password above.
                         sshPassword.takeIf { sshFeatures && !same && it.isNotEmpty() },
+                        targets,
                     )
                 },
             ) { Text(if (saving) "Saving…" else "Save") }
+        },
+        dismissButton = { OutlinedButton(onClick = onDismiss) { Text("Cancel") } },
+    )
+}
+
+/** Hosts the other paired devices have and this one lacks; the picked ones are copied here. */
+@Composable
+private fun CopyHostsDialog(vm: ConfigViewModel, saving: Boolean, error: String?, onDismiss: () -> Unit) {
+    val offers by vm.offers.collectAsStateWithLifecycle()
+    // (device id, host id); one host id only once.
+    var picked by remember { mutableStateOf<Set<Pair<String, String>>>(emptySet()) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Copy hosts from another device") },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                SectionBody(offers, onRetry = vm::loadOffers) { list ->
+                    if (list.all { it.error == null && it.hosts.isEmpty() }) {
+                        Text(
+                            "Every host of the other paired devices is already here.",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = lapis.muted,
+                        )
+                    }
+                    list.forEach { offer ->
+                        SectionTitle(offer.device.name)
+                        offer.error?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error) }
+                        if (offer.error == null && offer.hosts.isEmpty()) {
+                            Text("Nothing this device lacks.", style = MaterialTheme.typography.bodySmall, color = lapis.muted)
+                        }
+                        offer.hosts.forEach { (id, host) ->
+                            val key = offer.device.id to id
+                            val toggle = {
+                                // The same id from another device is replaced by this one.
+                                picked = if (key in picked) picked - key else picked.filterNot { it.second == id }.toSet() + key
+                            }
+                            Row(Modifier.fillMaxWidth().clickable(onClick = toggle), verticalAlignment = Alignment.CenterVertically) {
+                                Checkbox(checked = key in picked, onCheckedChange = { toggle() })
+                                Column(Modifier.weight(1f)) {
+                                    Text(id, style = MaterialTheme.typography.bodyMedium)
+                                    Text("${host.os} · ${host.tailscaleIp}", style = LapisType.MonoSmall, color = lapis.muted)
+                                }
+                            }
+                        }
+                    }
+                }
+                Text(
+                    "Passwords this phone has seen typed for a host go along; any other has to be set here afterwards.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = lapis.muted,
+                )
+                error?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error) }
+            }
+        },
+        confirmButton = {
+            Button(
+                enabled = picked.isNotEmpty() && !saving,
+                onClick = { vm.copyHosts(picked.toList()) { ok -> if (ok) onDismiss() } },
+            ) { Text(if (saving) "Copying…" else "Copy ${picked.size.takeIf { it > 0 } ?: ""}".trim()) }
         },
         dismissButton = { OutlinedButton(onClick = onDismiss) { Text("Cancel") } },
     )

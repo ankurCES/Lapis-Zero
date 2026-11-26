@@ -26,6 +26,7 @@ pub type StatusFn = Arc<dyn Fn(&str, &str) + Send + Sync>;
 /// The real device behind a provisioning session.
 pub struct DeviceBackend {
     pub auth: Arc<Auth>,
+    pub audit: Arc<crate::audit::Audit>,
     pub net: Arc<dyn NetControl>,
     pub harness: HarnessClient,
     pub on_status: StatusFn,
@@ -48,12 +49,27 @@ impl Backend for DeviceBackend {
     }
 
     fn wifi_connect(&self, ssid: String, psk: Option<String>) -> BoxFut<'_, Value> {
+        if let Some(p) = &psk {
+            lapis_crypto::register_secret(p);
+        }
         let net = self.net.clone();
+        let audit = self.audit.clone();
         Box::pin(async move {
-            tokio::task::spawn_blocking(move || net.wifi_connect(&ssid, psk.as_deref()))
-                .await
-                .unwrap_or_else(|_| json!({"state": "failed", "local_ip": ""}))
+            let name = ssid.clone();
+            let result =
+                tokio::task::spawn_blocking(move || net.wifi_connect(&ssid, psk.as_deref()))
+                    .await
+                    .unwrap_or_else(|_| json!({"state": "failed", "local_ip": ""}));
+            audit.record(
+                "wifi_connect",
+                json!({"ssid": name, "state": result["state"], "by": "bluetooth"}),
+            );
+            result
         })
+    }
+
+    fn paired_secrets(&self) -> Vec<(String, String)> {
+        self.auth.token_hashes()
     }
 
     fn tailscale_status(&self) -> BoxFut<'_, NetStatus> {

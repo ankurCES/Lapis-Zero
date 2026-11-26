@@ -398,6 +398,102 @@ class ProvisioningClientTest {
         expect<BleLinkLostException> { c.wifiScan() }
     }
 
+    // ------------------------------------------------------------------ paired-phone mode (4.2)
+
+    private val phoneToken = "lapis-token-of-this-phone-0123456789abcdef"
+
+    @Test
+    fun `a paired phone changes wifi with its token and no pin`() = runTest {
+        device.pairedTokens += listOf("some-other-phone-token", phoneToken)
+        device.pinOnScreen = false // the phone Wi-Fi window: paired phones only
+        val link = device.connect()
+        val c = client(link)
+        c.handshake()
+        assertEquals(TokenResult.Verified("dev_01"), c.verifyToken(phoneToken))
+        assertTrue(c.isVerified)
+        assertEquals("token", device.mode)
+        assertEquals(listOf("HomeWiFi", "café guest"), c.wifiScan().map { it.ssid })
+        assertEquals("connected", c.wifiConnect("HomeWiFi", "correct horse").state)
+        c.finish()
+        assertTrue(device.finished)
+        assertEquals(
+            listOf("token_verify", "wifi_scan", "wifi_connect", "finish_provisioning"),
+            device.commands.map { it.getValue("cmd").jsonPrimitive.content },
+        )
+        assertEquals(64, device.commands[0].getValue("proof").jsonPrimitive.content.length)
+        assertEquals("no new pairing and no new token", 0, device.registered)
+        // Neither the token, its hash nor the Wi-Fi password is readable on the wire.
+        val wire = link.writes.joinToString("") { it.toString(Charsets.ISO_8859_1) }
+        val hash = BleEnvelopeCrypto.pairedSecret(phoneToken).removePrefix("tok:")
+        for (secret in listOf(phoneToken, hash, "correct horse", "token_verify")) {
+            assertFalse("'$secret' is visible on the wire", wire.contains(secret))
+        }
+    }
+
+    @Test
+    fun `a paired phone is also accepted while a pin is on screen`() = runTest {
+        device.pairedTokens += phoneToken
+        val c = client(device.connect())
+        c.handshake()
+        assertEquals(TokenResult.Verified("dev_01"), c.verifyToken(phoneToken))
+        assertEquals("token", device.mode)
+        assertEquals(2, c.wifiScan().size)
+    }
+
+    @Test
+    fun `a device that does not know the token stays silent and the client gives up after 8 s`() = runTest {
+        device.pairedTokens += "some-other-phone-token"
+        device.pinOnScreen = false
+        val link = device.connect()
+        val c = client(link)
+        c.handshake()
+        val before = testScheduler.currentTime
+        assertEquals(TokenResult.NotPaired, c.verifyToken(phoneToken))
+        assertEquals(ProvisioningClient.PIN_TIMEOUT_MS, testScheduler.currentTime - before)
+        assertFalse(c.isVerified)
+        // One envelope, one token: the device counted one failed attempt and read nothing.
+        assertEquals(1, link.writes.size)
+        assertEquals(1, device.failures)
+        assertTrue(device.commands.isEmpty())
+        // The spent session refuses to go on.
+        expect<IllegalStateException> { c.wifiScan() }
+    }
+
+    @Test
+    fun `a revoked phone gets no answer either`() = runTest {
+        device.pinOnScreen = false // no tokens at all: every phone was revoked
+        val c = client(device.connect())
+        c.handshake()
+        assertEquals(TokenResult.NotPaired, c.verifyToken(phoneToken, timeoutMs = 2_000))
+    }
+
+    @Test
+    fun `a paired phone may only scan join and finish`() = runTest {
+        device.pairedTokens += phoneToken
+        val c = client(device.connect())
+        c.handshake()
+        c.verifyToken(phoneToken)
+        val refused = expect<BleCommandException> { c.pushSecrets(mapOf("ANTHROPIC_API_KEY" to "sk-ant-x")) }
+        assertEquals("push_secrets", refused.command)
+        assertEquals("not allowed for a paired phone", refused.message)
+        val tailscale = expect<BleCommandException> { c.tailscaleUp("tskey-auth-x").toList() }
+        assertEquals("tailscale_up", tailscale.command)
+        assertTrue("nothing was stored", device.savedSecrets.isEmpty())
+        // The session stays usable.
+        assertEquals("connected", c.wifiConnect("café guest", null).state)
+    }
+
+    @Test
+    fun `a device that cannot prove it knows the token is rejected`() = runTest {
+        device.pairedTokens += phoneToken
+        device.lieAboutProof = true
+        val c = client(device.connect())
+        c.handshake()
+        expect<HandshakeException> { c.verifyToken(phoneToken) }
+        assertFalse(c.isVerified)
+        expect<IllegalStateException> { c.wifiScan() }
+    }
+
     @Test
     fun `event parsing covers every documented event`() {
         fun parse(json: String) = BleEvent.parse(json.toByteArray())
@@ -413,6 +509,7 @@ class ProvisioningClientTest {
         assertEquals(BleEvent.Ready("f.ts.net", "100.1.2.3"), parse("""{"evt":"ready","tailscale_fqdn":"f.ts.net","tailscale_ip":"100.1.2.3"}"""))
         assertEquals(BleEvent.SecretsSaved(listOf("A", "B")), parse("""{"evt":"secrets_saved","keys":["A","B"]}"""))
         assertEquals(BleEvent.Bye, parse("""{"evt":"bye"}"""))
+        assertEquals(BleEvent.TokenVerified("cd", "dev_02"), parse("""{"evt":"token_verified","proof":"cd","device_id":"dev_02"}"""))
         assertEquals(BleEvent.Error("wifi_scan", "boom"), parse("""{"evt":"error","cmd":"wifi_scan","message":"boom"}"""))
         assertEquals(BleEvent.Unknown("future"), parse("""{"evt":"future","x":1}"""))
         assertEquals(null, parse("""{"no_evt":1}"""))

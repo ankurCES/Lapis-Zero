@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import json
 from pathlib import Path
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 
+from lapis_daemon.api.auth import hash_token
 from lapis_daemon.ble_prov import crypto
+from lapis_daemon.ble_prov.session import ProvisioningSession
 
 VECTORS = json.loads(
     (
@@ -148,3 +152,72 @@ def test_handshake_rejects_bad_hellos_and_low_order_points() -> None:
     with pytest.raises(crypto.HandshakeError):  # all-zero shared secret (RFC 7748 6.1)
         crypto.compute_shared(private, bytes(32))
     crypto.self_test()
+
+
+def test_paired_vector_token_secret_keys_proofs_and_envelope() -> None:
+    """Protocol 4.2: same handshake, `"tok:" + sha256(api_token)` in place of the PIN."""
+    P, PD = VECTORS["paired_vector"], VECTORS["paired_vector"]["derived"]
+    # The secret is exactly what paired_devices stores per phone: lowercase hex SHA-256.
+    assert P["token_hash_hex"] == hash_token(P["api_token"]) == P["token_hash_hex"].lower()
+    assert P["secret"] == "tok:" + P["token_hash_hex"] and len(P["secret"]) == 68
+
+    pin_keys = _keys()
+    keys = crypto.derive_keys(
+        bytes.fromhex(V["shared_secret_hex"]),
+        *(bytes.fromhex(V[k]) for k in ("client_pub_hex", "device_pub_hex")),
+        *(bytes.fromhex(V[k]) for k in ("client_nonce_hex", "device_nonce_hex")),
+        P["secret"],
+    )
+    salt = hashlib.sha256(keys.transcript + P["secret"].encode("ascii")).digest()
+    assert salt.hex() == PD["salt_hex"]
+    assert keys.k_c2d.hex() == PD["k_c2d_hex"] and keys.k_d2c.hex() == PD["k_d2c_hex"]
+    assert keys.k_pin.hex() == PD["k_pin_hex"]
+    assert crypto.client_proof(keys).hex() == PD["client_proof_hex"]
+    assert crypto.server_proof(keys).hex() == PD["server_proof_hex"]
+    plaintext = P["plaintext_utf8"].encode()
+    assert json.loads(plaintext) == {"cmd": "token_verify", "proof": PD["client_proof_hex"]}
+    envelope = crypto.seal(keys.k_c2d, V["dir_byte"], V["seq"], plaintext)
+    assert envelope.hex() == PD["envelope_hex"]
+    # The PIN's keys do not open it: that is how the device tells the two modes apart.
+    with pytest.raises(crypto.EnvelopeError, match="authentication"):
+        crypto.open_envelope(pin_keys.k_c2d, crypto.DIR_C2D, envelope, 1)
+
+
+def test_session_answers_the_paired_vector() -> None:
+    """The real session, given the vector's device key, opens its envelope and proves back."""
+    P, PD = VECTORS["paired_vector"], VECTORS["paired_vector"]["derived"]
+    sent: list[bytes] = []
+
+    class Backend:
+        def paired_hashes(self) -> list[tuple[str, str]]:
+            return [("dev_07", P["token_hash_hex"])]
+
+        def status(self, status: str, pin: str) -> None:
+            raise AssertionError("a paired phone never touches the pairing screen")
+
+    async def notify(frame: bytes) -> None:
+        sent.append(frame)
+
+    async def scenario() -> None:
+        s = ProvisioningSession(Backend(), notify, allow_pin=False)  # type: ignore[arg-type]
+        s._private = X25519PrivateKey.from_private_bytes(bytes.fromhex(V["device_priv_hex"]))
+        s.public = bytes.fromhex(V["device_pub_hex"])
+        s.device_nonce = bytes.fromhex(V["device_nonce_hex"])
+        s.handshake_write(
+            crypto.build_hello(
+                bytes.fromhex(V["client_pub_hex"]), bytes.fromhex(V["client_nonce_hex"])
+            )
+        )
+        envelope = bytes.fromhex(PD["envelope_hex"])
+        for frame in crypto.split_frames(0, crypto.FLAG_ENCRYPTED, envelope, 508):
+            await s.on_frame(frame)
+        rx = crypto.Reassembler()
+        (done,) = [d for d in (rx.feed(f) for f in sent) if d is not None]
+        answer = crypto.open_envelope(bytes.fromhex(PD["k_d2c_hex"]), crypto.DIR_D2C, done[1], 1)
+        assert json.loads(answer) == {
+            "evt": "token_verified",
+            "proof": PD["server_proof_hex"],
+            "device_id": "dev_07",
+        }
+
+    asyncio.run(scenario())

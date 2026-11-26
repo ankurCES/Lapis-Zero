@@ -1,5 +1,6 @@
-//! [4] NETOPS — Tailscale peers, passive Wi-Fi and BLE surveys, port probes, packet capture
-//! and DNS. Active tools go through the Policy Gate and ask `[Y/N]` here on the deck.
+//! [4] NETOPS — the deck's own Wi-Fi (`ws/wifi.rs`), Tailscale peers, passive Wi-Fi and BLE
+//! surveys, port probes, packet capture and DNS. Active tools go through the Policy Gate and
+//! ask `[Y/N]` here on the deck.
 
 use crate::app::{pane, DeckApp, Nav};
 use crate::model::Model;
@@ -18,6 +19,7 @@ pub struct State {
     pub count: String,
     pub dns: String,
     pub forms: [Form; 3],
+    pub wifi: crate::ws::wifi::State,
 }
 
 impl Default for State {
@@ -30,6 +32,7 @@ impl Default for State {
             count: "50".into(),
             dns: String::new(),
             forms: [Form::default(); 3],
+            wifi: Default::default(),
         }
     }
 }
@@ -61,6 +64,7 @@ fn result_rows(app: &DeckApp, tool: &str, key: &str) -> Vec<Value> {
 pub fn sections(app: &DeckApp) -> Vec<Section> {
     let n = |tool: &str, key: &str| result_rows(app, tool, key).len();
     vec![
+        Section::new("📡", "Wi-Fi").detail(crate::ws::wifi::detail(app)),
         Section::new("🔗", "Tailscale peers")
             .detail(format!("{} peers", n("net.tailscale_peers", "peers"))),
         Section::new("📶", "Wi-Fi survey").detail(format!(
@@ -78,11 +82,12 @@ pub fn sections(app: &DeckApp) -> Vec<Section> {
 /// X in the sidebar: refresh or run the selected tool.
 pub fn run_section(app: &mut DeckApp, section: usize) {
     match section {
-        0 => app.invoke("net.tailscale_peers", json!({})),
-        1 => app.invoke("net.wifi_scan_passive", json!({})),
-        2 => app.invoke("net.ble_scan_passive", json!({"duration_s": 8})),
-        3 => probe(app),
-        4 => capture(app),
+        0 => crate::ws::wifi::scan(app),
+        1 => app.invoke("net.tailscale_peers", json!({})),
+        2 => app.invoke("net.wifi_scan_passive", json!({})),
+        3 => app.invoke("net.ble_scan_passive", json!({"duration_s": 8})),
+        4 => probe(app),
+        5 => capture(app),
         _ => dns(app),
     }
 }
@@ -118,6 +123,10 @@ fn row(ui: &mut Ui, text: String, color: egui::Color32) {
 }
 
 pub fn show(app: &mut DeckApp, ui: &mut Ui, nav: Nav, section: usize, focused: bool) {
+    if section == 0 {
+        return crate::ws::wifi::show(app, ui, nav, focused);
+    }
+    let section = section - 1;
     let run = focused && nav.x;
     if focused && section < 3 {
         app.hint("X", "refresh");

@@ -98,7 +98,7 @@ def test_status_snapshot_and_missing_tools(monkeypatch) -> None:
     asyncio.run(scenario())
 
 
-def test_network_ctl_sequences_commands_without_the_tools() -> None:
+def test_network_ctl_sequences_commands_without_the_tools(tmp_path: Path) -> None:
     listing = "HomeWiFi:72:WPA2\nHomeWiFi:40:WPA2\nCafe\\:Guest:55:\n:30:WPA2\nOpen:20:--\n"
     assert parse_wifi_list(listing) == [
         {"ssid": "HomeWiFi", "rssi": -64, "secured": True},
@@ -129,15 +129,17 @@ def test_network_ctl_sequences_commands_without_the_tools() -> None:
                 return 1, "backend error: invalid key: tskey-auth-abc does not exist\n"
             return 0, ""
 
-        net = NetworkCtl(run, poll=0)
-        assert await net.wifi_connect("HomeWiFi", "pw") == {
+        net = NetworkCtl(run, poll=0, nm_dir=tmp_path)
+        assert await net.wifi_connect("HomeWiFi", "pw-12345678") == {
             "state": "connected",
             "local_ip": "192.168.1.42",
         }
-        connect = ("nmcli", "--wait", "30", "dev", "wifi", "connect", "HomeWiFi", "password", "pw")
+        load = ("nmcli", "connection", "load", str(net.keyfile_path("HomeWiFi")))
         stale = ("nmcli", "connection", "delete", "id", "HomeWiFi")
-        # A saved profile for the SSID is always removed before nmcli joins it again.
-        assert calls.index(stale) < calls.index(connect)
+        # A saved profile for the SSID is always removed before the new one is loaded,
+        # and the password is in the root-only keyfile, never on a command line.
+        assert calls.index(stale) < calls.index(load)
+        assert not any("pw-12345678" in arg for argv in calls for arg in argv)
         status = await net.wait_tailscale(timeout=1, poll=0.01)
         assert status["state"] == "connected"
         # Already stored by tailscaled: confirmed from its status, nothing re-run.

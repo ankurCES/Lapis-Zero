@@ -25,6 +25,10 @@ object TestVectors {
     val derived: JsonObject get() = crypto.getValue("derived").jsonObject
     val framing: JsonObject get() = root.getValue("chunk_framing_vector").jsonObject
 
+    /** Paired-phone mode (section 4.2): crypto_vector's keys and nonces, the token secret instead of the PIN. */
+    val paired: JsonObject get() = root.getValue("paired_vector").jsonObject
+    val pairedDerived: JsonObject get() = paired.getValue("derived").jsonObject
+
     fun JsonObject.hex(key: String): ByteArray = str(key).hexToBytesOrNull() ?: error("bad hex in $key")
     fun JsonObject.str(key: String): String = getValue(key).jsonPrimitive.content
     fun JsonObject.int(key: String): Int = getValue(key).jsonPrimitive.int

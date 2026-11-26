@@ -39,6 +39,12 @@ def register_device_sync(db: LapisDb, name: str, model: str) -> tuple[str, str]:
     return device_id, token
 
 
+def paired_hashes_sync(db: LapisDb) -> list[tuple[str, str]]:
+    """(device id, token hash) of every phone that is not revoked: the BLE paired-phone keys."""
+    rows = db.run_sync("SELECT id, token_hash FROM paired_devices WHERE revoked = 0")
+    return [(r["id"], r["token_hash"]) for r in rows]
+
+
 class Auth:
     def __init__(self, db: LapisDb) -> None:
         self.db = db

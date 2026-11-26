@@ -18,6 +18,31 @@ use std::time::{Duration, Instant};
 use tokio::sync::oneshot;
 
 pub const QR_TTL_S: u64 = 180;
+
+/// Opens the phone Wi-Fi window once per offline episode (protocol 4.2).
+#[derive(Default)]
+pub struct OfflineWatch {
+    since: Option<Instant>,
+    fired: bool,
+}
+
+impl OfflineWatch {
+    pub const AFTER: Duration = Duration::from_secs(30);
+
+    /// True exactly once per episode: 30 s after Wi-Fi lost its connection.
+    pub fn tick(&mut self, online: bool, now: Instant) -> bool {
+        if online {
+            *self = Self::default();
+            return false;
+        }
+        let since = *self.since.get_or_insert(now);
+        if !self.fired && now.duration_since(since) >= Self::AFTER {
+            self.fired = true;
+            return true;
+        }
+        false
+    }
+}
 const SKIP_TO_PHONES: [&str; 3] = ["mic_level", "screen_request", "ui_settings"];
 
 pub struct App {
@@ -41,6 +66,10 @@ pub struct App {
     pairing: Mutex<Option<Value>>,
     pairing_epoch: AtomicU64,
     ble_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// The phone Wi-Fi window (paired phones only): its task and when it closes.
+    phone_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    phone_until: Mutex<i64>,
+    offline: Mutex<OfflineWatch>,
     ui: Mutex<Value>,
     screens: Mutex<HashMap<String, oneshot::Sender<Vec<u8>>>>,
     pub deck: crate::deck::DeckState,
@@ -93,6 +122,9 @@ impl App {
             pairing: Mutex::new(None),
             pairing_epoch: AtomicU64::new(0),
             ble_task: Mutex::new(None),
+            phone_task: Mutex::new(None),
+            phone_until: Mutex::new(0),
+            offline: Mutex::new(OfflineWatch::default()),
             ui: Mutex::new(ui),
             screens: Mutex::new(HashMap::new()),
             cfg: p.cfg,
@@ -257,6 +289,20 @@ impl App {
                 }
                 if changed {
                     self.broadcast_state();
+                }
+                let online = !self.net().wifi_ssid.is_empty();
+                let fire = self
+                    .offline
+                    .lock()
+                    .map(|mut w| w.tick(online, Instant::now()))
+                    .unwrap_or(false);
+                if fire && !self.mock && self.auth.paired_count() > 0 {
+                    tracing::info!(
+                        "Wi-Fi offline for 30 s: paired phones may set it over Bluetooth"
+                    );
+                    if let Err(e) = self.phone_window_start().await {
+                        tracing::warn!(error = %e, "phone Wi-Fi window");
+                    }
                 }
             }
             let me = self.clone();
@@ -478,28 +524,178 @@ impl App {
                "expires_in": ble::WINDOW_S, "expires_at": now() + ble::WINDOW_S as i64})
     }
 
+    fn ble_backend(&self, on_status: ble::StatusFn) -> Arc<ble::DeviceBackend> {
+        Arc::new(ble::DeviceBackend {
+            auth: self.auth.clone(),
+            audit: self.audit.clone(),
+            net: self.net_ctl.clone(),
+            harness: self.harness.clone(),
+            on_status,
+        })
+    }
+
+    // ------------------------------------------------------------------ Wi-Fi
+
+    /// When the phone Wi-Fi window closes (epoch s), 0 when it is not open.
+    pub fn phone_window(&self) -> i64 {
+        self.phone_until
+            .lock()
+            .map(|u| *u)
+            .ok()
+            .filter(|u| *u > now())
+            .unwrap_or(0)
+    }
+
+    fn set_phone_until(&self, until: i64) {
+        if let Ok(mut u) = self.phone_until.lock() {
+            *u = until;
+        }
+    }
+
+    fn stop_phone_window(&self) {
+        if let Ok(mut t) = self.phone_task.lock() {
+            if let Some(task) = t.take() {
+                task.abort();
+            }
+        }
+        self.set_phone_until(0);
+    }
+
+    /// Lets paired phones set Wi-Fi over Bluetooth for 5 minutes, with no PIN on screen.
+    /// An open PIN window already accepts them.
+    pub async fn phone_window_start(self: &Arc<Self>) -> Result<(), String> {
+        if self.auth.paired_count() == 0 {
+            return Err("No phone is paired with this device yet".into());
+        }
+        if self.pairing().is_some_and(|p| p["mode"] == "pin") || self.phone_window() > 0 {
+            return Ok(());
+        }
+        let until = now() + ble::WINDOW_S as i64;
+        self.set_phone_until(until);
+        if self.mock {
+            let me = self.clone();
+            let task = tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_secs(ble::WINDOW_S)).await;
+                me.set_phone_until(0);
+            });
+            if let Ok(mut t) = self.phone_task.lock() {
+                *t = Some(task);
+            }
+            return Ok(());
+        }
+        self.run_phone_window()
+    }
+
+    #[cfg(all(target_os = "linux", feature = "bluez"))]
+    fn run_phone_window(self: &Arc<Self>) -> Result<(), String> {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let session = Session::paired_only(self.ble_backend(Arc::new(|_: &str, _: &str| {})), tx);
+        let me = self.clone();
+        let task = tokio::spawn(async move {
+            let res = ble::bluez::run_window(
+                session,
+                rx,
+                Duration::from_secs(ble::WINDOW_S),
+                Duration::from_secs(ble::FINISH_S),
+                |_| {},
+            )
+            .await;
+            if let Err(e) = res {
+                tracing::warn!(error = %e, "phone Wi-Fi window failed");
+            }
+            me.set_phone_until(0);
+            me.refresh_net().await;
+            me.broadcast_state();
+        });
+        if let Ok(mut t) = self.phone_task.lock() {
+            if let Some(old) = t.replace(task) {
+                old.abort();
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(not(all(target_os = "linux", feature = "bluez")))]
+    fn run_phone_window(self: &Arc<Self>) -> Result<(), String> {
+        self.set_phone_until(0);
+        Err("Bluetooth unavailable: this build has no BlueZ support (feature `bluez`)".into())
+    }
+
+    /// `GET /v1/wifi`: the current network, saved profiles and the phone window.
+    pub async fn wifi_view(&self) -> Value {
+        let ctl = self.net_ctl.clone();
+        let saved = tokio::task::spawn_blocking(move || ctl.wifi_saved())
+            .await
+            .unwrap_or_default();
+        // The mock's hardware never changes network; its NetControl does.
+        let net = if self.mock {
+            self.net_ctl.tailscale_status()
+        } else {
+            self.net()
+        };
+        // A PIN window on screen takes paired phones too.
+        let pin_until = self
+            .pairing()
+            .filter(|p| p["mode"] == "pin")
+            .and_then(|p| p["expires_at"].as_i64())
+            .unwrap_or(0);
+        let until = self.phone_window().max(pin_until);
+        json!({"ssid": net.wifi_ssid, "ip": net.wifi_ip, "rssi": net.wifi_rssi_dbm, "saved": saved,
+               "ble": {"open": until > 0, "expires_at": until}})
+    }
+
+    /// Joins a network (the owner's action: audited, the password never recorded).
+    pub async fn wifi_connect(&self, ssid: String, psk: Option<String>, by: &str) -> Value {
+        if let Some(p) = &psk {
+            lapis_crypto::register_secret(p);
+        }
+        let ctl = self.net_ctl.clone();
+        let name = ssid.clone();
+        let result = tokio::task::spawn_blocking(move || ctl.wifi_connect(&name, psk.as_deref()))
+            .await
+            .unwrap_or_else(|_| json!({"state": "failed", "local_ip": ""}));
+        self.audit.record(
+            "wifi_connect",
+            json!({"ssid": ssid, "state": result["state"], "by": by}),
+        );
+        self.refresh_net().await;
+        self.broadcast_state();
+        result
+    }
+
+    pub async fn wifi_forget(&self, name: String, by: &str) -> bool {
+        let ctl = self.net_ctl.clone();
+        let n = name.clone();
+        let ok = tokio::task::spawn_blocking(move || ctl.wifi_forget(&n))
+            .await
+            .unwrap_or(false);
+        if ok {
+            self.audit
+                .record("wifi_forget", json!({"name": name, "by": by}));
+            self.refresh_net().await;
+            self.broadcast_state();
+        }
+        ok
+    }
+
     async fn start_ble(self: &Arc<Self>) {
         if let Ok(mut t) = self.ble_task.lock() {
             if let Some(old) = t.take() {
                 old.abort();
             }
         }
+        self.stop_phone_window(); // one GATT server at a time; the PIN window takes paired phones too
         let weak = Arc::downgrade(self);
         let name = Arc::new(Mutex::new(format!("{}MOCK", ble::NAME_PREFIX)));
         let name_cb = name.clone();
-        let backend = Arc::new(ble::DeviceBackend {
-            auth: self.auth.clone(),
-            net: self.net_ctl.clone(),
-            harness: self.harness.clone(),
-            on_status: Arc::new(move |status, pin| {
-                if let Some(app) = weak.upgrade() {
-                    let device = name_cb.lock().map(|n| n.clone()).unwrap_or_default();
-                    let ttl = (status == "done").then_some(Duration::from_secs(3));
-                    tracing::info!(status, "pairing");
-                    app.set_pairing(Some(Self::pin_view(pin, &device, status)), ttl);
-                }
-            }),
-        });
+        let backend = self.ble_backend(Arc::new(move |status, pin| {
+            if let Some(app) = weak.upgrade() {
+                let device = name_cb.lock().map(|n| n.clone()).unwrap_or_default();
+                let ttl = (status == "done").then_some(Duration::from_secs(3));
+                tracing::info!(status, "pairing");
+                app.set_pairing(Some(Self::pin_view(pin, &device, status)), ttl);
+            }
+        }));
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let session = Session::new(backend, tx);
         let pin = session.pin().await;

@@ -610,3 +610,107 @@ async fn deck_subsystems_over_the_api() {
     let (_, state) = http(addr, "GET", "/v1/state", Some(&t), None).await;
     assert_eq!(state["deck"]["summary"]["gps"]["fix"], "3D");
 }
+
+#[tokio::test]
+async fn wifi_over_the_api() {
+    let dir = tempfile::tempdir().unwrap();
+    let listener = lapis_daemon::bind(0).await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let app = App::new(Parts {
+        cfg: DeckConfig::default(),
+        paths: Paths {
+            state_dir: dir.path().join("state"),
+            harness_socket: dir.path().join("none.sock"),
+        },
+        mock: true,
+        hw: Arc::new(MockHardware::default()),
+        net_ctl: Arc::new(MockNet::default()),
+        dev_advertise: None,
+    })
+    .unwrap();
+    tokio::spawn(lapis_daemon::serve(app.clone(), listener));
+    let t = std::fs::read_to_string(dir.path().join("state/local.token")).unwrap();
+    let t = Some(t.as_str());
+
+    let (st, v) = http(addr, "GET", "/v1/wifi", t, None).await;
+    assert_eq!((st, v["ssid"].as_str()), (200, Some("lapis-lab")));
+    assert_eq!(v["saved"], json!([{"name": "lapis-lab", "active": true}]));
+    assert_eq!(v["ble"], json!({"open": false, "expires_at": 0}));
+    let (_, v) = http(addr, "GET", "/v1/wifi/scan", t, None).await;
+    assert_eq!(v["networks"][1]["ssid"], "cafe");
+
+    for bad in [
+        json!({"ssid": "", "psk": null}),
+        json!({"ssid": "x".repeat(33)}),
+        json!({"ssid": "home", "psk": "short"}),
+        json!({"ssid": "home", "psk": "tab\there-is-bad"}),
+    ] {
+        let (st, v) = http(addr, "POST", "/v1/wifi/connect", t, Some(bad)).await;
+        assert_eq!((st, v["error"]["code"].as_str()), (422, Some("invalid")));
+    }
+    let (_, v) = http(
+        addr,
+        "POST",
+        "/v1/wifi/connect",
+        t,
+        Some(json!({"ssid": "cafe"})),
+    )
+    .await;
+    assert_eq!(v, json!({"state": "connected", "local_ip": "192.168.1.42"}));
+    let secret = "pw-never-in-the-audit-0123";
+    let (_, v) = http(
+        addr,
+        "POST",
+        "/v1/wifi/connect",
+        t,
+        Some(json!({"ssid": "lapis-lab", "psk": secret})),
+    )
+    .await;
+    assert_eq!(v["state"], "connected");
+    let (_, audit) = http(addr, "GET", "/v1/deck/audit", t, None).await;
+    let audit = audit.to_string();
+    assert!(audit.contains("wifi_connect") && !audit.contains(secret));
+
+    let (st, _) = http(
+        addr,
+        "POST",
+        "/v1/wifi/forget",
+        t,
+        Some(json!({"name": "nope"})),
+    )
+    .await;
+    assert_eq!(st, 404);
+    let (st, v) = http(
+        addr,
+        "POST",
+        "/v1/wifi/forget",
+        t,
+        Some(json!({"name": "cafe"})),
+    )
+    .await;
+    assert_eq!((st, v["saved"].as_array().unwrap().len()), (200, 1));
+
+    // The phone Wi-Fi window needs a paired phone.
+    let (st, v) = http(addr, "POST", "/v1/wifi/ble", t, None).await;
+    assert_eq!((st, v["error"]["code"].as_str()), (409, Some("not_paired")));
+    let (_, phone) = app.auth.register("Pixel", "Pixel 9");
+    let (st, v) = http(addr, "POST", "/v1/wifi/ble", Some(&phone), None).await;
+    assert_eq!((st, v["ble"]["open"].as_bool()), (200, Some(true)));
+    assert!(v["ble"]["expires_at"].as_i64().unwrap() > lapis_daemon::auth::now());
+}
+
+#[test]
+fn phone_window_opens_once_per_offline_episode() {
+    use lapis_daemon::app::OfflineWatch;
+    let t0 = std::time::Instant::now();
+    let s = |n| t0 + std::time::Duration::from_secs(n);
+    let mut w = OfflineWatch::default();
+    assert!(!w.tick(true, s(0)));
+    assert!(!w.tick(false, s(5)));
+    assert!(!w.tick(false, s(34)));
+    assert!(w.tick(false, s(35)), "30 s offline");
+    assert!(!w.tick(false, s(400)), "once per episode");
+    assert!(!w.tick(true, s(401)));
+    assert!(!w.tick(false, s(402)));
+    assert!(w.tick(false, s(433)), "re-armed after Wi-Fi came back");
+}

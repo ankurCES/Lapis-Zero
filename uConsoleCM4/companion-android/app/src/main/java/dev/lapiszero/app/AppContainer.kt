@@ -13,6 +13,7 @@ import dev.lapiszero.app.data.local.RoomChatCache
 import dev.lapiszero.app.data.local.SecureStore
 import dev.lapiszero.app.data.remote.Approval
 import dev.lapiszero.app.domain.DeviceRepository
+import dev.lapiszero.app.domain.HostBook
 import dev.lapiszero.app.domain.LapisSession
 import dev.lapiszero.app.domain.SessionManager
 import dev.lapiszero.app.notifications.AgentWatchService
@@ -37,10 +38,13 @@ class AppContainer(
     private val context: Context,
     /** Where hosts and tokens live; only tests replace the Keystore-backed vault. */
     secureStore: SecureStore = KeystoreSecureStore(context),
+    /** KVM-host passwords typed into the app (see [HostBook]): its own Keystore-sealed entry. */
+    hostBookStore: SecureStore = KeystoreSecureStore(context, "lapis_hostbook"),
 ) {
     val appScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     val settings = AppSettings(context)
     val devices = DeviceRepository(secureStore)
+    val hostBook = HostBook(hostBookStore)
     val chatCache: ChatCache by lazy {
         runCatching { RoomChatCache(LapisDatabase.open(context).chatCache()) }.getOrDefault(ChatCache.None)
     }

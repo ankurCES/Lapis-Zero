@@ -8,15 +8,25 @@ from typing import Any
 
 import pytest
 
+from lapis_daemon.api.auth import hash_token, paired_hashes_sync, register_device_sync
 from lapis_daemon.ble_prov import crypto
 from lapis_daemon.ble_prov import session as sess
 from lapis_daemon.ble_prov.session import ProvisioningSession
+from lapis_daemon.db import LapisDb
+
+PHONE_TOKEN = "phone-token-" + "p" * 31  # what a paired phone keeps in its vault
+
+
+def token_secret(token: str) -> str:
+    """What a paired phone uses in place of the PIN (protocol section 4.2)."""
+    return "tok:" + hash_token(token)
 
 
 class FakeBackend:
     def __init__(self) -> None:
         self.statuses: list[tuple[str, str]] = []
         self.registered: list[tuple[str, str]] = []
+        self.paired: list[tuple[str, str]] = []
         self.wifi: list[tuple[str, str | None]] = []
         self.secrets: dict[str, str] = {}
         self.authkey: Any = "unset"
@@ -47,6 +57,9 @@ class FakeBackend:
     async def register_device(self, name: str, model: str) -> tuple[str, str]:
         self.registered.append((name, model))
         return "dev_01", "token-" + "x" * 37
+
+    def paired_hashes(self) -> list[tuple[str, str]]:
+        return list(self.paired)
 
     async def wifi_scan(self) -> list[dict[str, Any]]:
         return [{"ssid": "HomeWiFi", "rssi": -58, "secured": True}]
@@ -81,13 +94,15 @@ class FakeBackend:
 class Phone:
     """The Android side, built only from the protocol document."""
 
-    def __init__(self, mtu: int = 23) -> None:
+    def __init__(
+        self, mtu: int = 23, allow_pin: bool = True, backend: FakeBackend | None = None
+    ) -> None:
         self.mtu = mtu
-        self.backend = FakeBackend()
+        self.backend = backend or FakeBackend()
         self.notified: list[bytes] = []
         self.disconnects = 0
         self.session = ProvisioningSession(
-            self.backend, self._notify, self._disconnect, poll_interval=0.001
+            self.backend, self._notify, self._disconnect, poll_interval=0.001, allow_pin=allow_pin
         )
         self.session.mtu = mtu
         self.rx = crypto.Reassembler()
@@ -157,6 +172,10 @@ class Phone:
         )
         (event,) = self.events()
         return event
+
+    async def token_verify(self) -> list[dict[str, Any]]:
+        await self.send({"cmd": "token_verify", "proof": crypto.client_proof(self.keys).hex()})
+        return self.events()
 
 
 @pytest.mark.parametrize("mtu", [23, 185, 517])
@@ -355,3 +374,171 @@ def test_bad_hello_is_rejected() -> None:
     with pytest.raises(crypto.HandshakeError):
         s.handshake_write(b"\x01" + bytes(32) + bytes(16))  # low-order point
     assert len(s.handshake_read()) == 49
+
+
+def paired_phone(allow_pin: bool = False, mtu: int = 185) -> Phone:
+    """A session with one paired phone (dev_07) and the phone that holds its token."""
+    backend = FakeBackend()
+    backend.paired = [
+        ("dev_03", hash_token("another phone's token")),
+        ("dev_07", hash_token(PHONE_TOKEN)),
+    ]
+    return Phone(mtu, allow_pin=allow_pin, backend=backend)
+
+
+def test_paired_phone_changes_wifi_in_the_phone_wifi_window() -> None:
+    async def scenario() -> None:
+        phone = paired_phone()
+        s = phone.session
+        phone.handshake(token_secret(PHONE_TOKEN))
+        (verified,) = await phone.token_verify()
+        assert verified == {
+            "evt": "token_verified",
+            "proof": crypto.server_proof(phone.keys).hex(),  # the phone checks this one
+            "device_id": "dev_07",
+        }
+        assert s.verified and s.paired_device_id == "dev_07"
+
+        await phone.send({"cmd": "wifi_scan"})
+        assert phone.events()[0]["evt"] == "wifi_list"
+        await phone.send({"cmd": "wifi_connect", "ssid": "NewHome", "psk": "hunter22"})
+        assert [e["state"] for e in phone.events()] == ["connecting", "connected"]
+        assert phone.backend.wifi == [("NewHome", "hunter22")]
+
+        # Only Wi-Fi: everything else is refused, and the session stays usable.
+        for cmd in ("tailscale_up", "push_secrets", "make_coffee"):
+            await phone.send({"cmd": cmd, "secrets": {"ANTHROPIC_API_KEY": "x"}})
+            assert phone.events() == [
+                {"evt": "error", "cmd": cmd, "message": "not allowed for a paired phone"}
+            ], cmd
+        assert phone.backend.secrets == {} and phone.backend.authkey == "unset"
+        # A PIN proof on token keys is a failed attempt (dropped once verified).
+        await phone.send({"cmd": "pin_verify", "proof": crypto.client_proof(phone.keys).hex()})
+        assert phone.events() == [] and s.verified and phone.backend.registered == []
+
+        await phone.send({"cmd": "finish_provisioning"})
+        assert phone.events() == [{"evt": "bye"}] and s.done.is_set()
+        # Nothing reached the pairing screen, and no device was registered.
+        assert phone.backend.statuses == [] and phone.backend.registered == []
+        assert phone.disconnects == 0 and s.failures == 0
+
+    asyncio.run(scenario())
+
+
+def test_wrong_token_is_a_failed_attempt_and_three_lock_out() -> None:
+    async def scenario() -> None:
+        phone = paired_phone()
+        s = phone.session
+        phone.handshake(token_secret("a token this device never issued"))
+        for attempt in (1, 2):
+            await phone.token_verify()
+            assert s.failures == attempt and phone.notified == [] and not s.verified
+        # Same hellos, right token, seq 1 again: it is accepted before the third strike.
+        phone.rekey(token_secret(PHONE_TOKEN))
+        assert (await phone.token_verify())[0]["evt"] == "token_verified"
+
+        phone = paired_phone()
+        s = phone.session
+        old_pub = s.public
+        phone.handshake(token_secret("a token this device never issued"))
+        for _ in range(3):
+            await phone.send(
+                {"cmd": "token_verify", "proof": crypto.client_proof(phone.keys).hex()}, seq=1
+            )
+        assert phone.disconnects == 1 and s.public != old_pub and s.locked_until > 0
+        assert phone.backend.statuses == []  # the phone Wi-Fi window shows nothing, even then
+        with pytest.raises(crypto.HandshakeError, match="locked"):
+            phone.handshake(token_secret(PHONE_TOKEN))
+
+    asyncio.run(scenario())
+
+
+def test_revoked_phone_is_refused(tmp_path: Any) -> None:
+    db = LapisDb(tmp_path / "lapis.db")
+    db._init()
+    kept, kept_token = register_device_sync(db, "Pixel", "Pixel 9")
+    gone, gone_token = register_device_sync(db, "Old phone", "Pixel 6")
+    db.run_sync("UPDATE paired_devices SET revoked = 1 WHERE id = ?", (gone,))
+    # The device side's secret is exactly the stored hash: lowercase hex SHA-256.
+    assert paired_hashes_sync(db) == [(kept, hash_token(kept_token))]
+
+    async def scenario() -> None:
+        backend = FakeBackend()
+        backend.paired = paired_hashes_sync(db)
+        phone = Phone(185, allow_pin=False, backend=backend)
+        phone.handshake(token_secret(gone_token))
+        assert await phone.token_verify() == [] and phone.session.failures == 1
+        phone.rekey(token_secret(kept_token))
+        (verified,) = await phone.token_verify()
+        assert verified["evt"] == "token_verified" and verified["device_id"] == kept
+
+    asyncio.run(scenario())
+
+
+def test_pin_is_refused_in_the_phone_wifi_window() -> None:
+    async def scenario() -> None:
+        phone = paired_phone(allow_pin=False)
+        s = phone.session
+        phone.handshake(s.pin)  # even the right PIN: there is none on the LCD
+        await phone.send({"cmd": "pin_verify", "proof": crypto.client_proof(phone.keys).hex()})
+        assert (
+            phone.notified == []
+            and s.failures == 1
+            and not s.verified
+            and phone.backend.registered == []
+        )
+        assert phone.backend.statuses == []
+
+    asyncio.run(scenario())
+
+
+def test_pin_pairing_still_works_with_paired_phones_present() -> None:
+    async def scenario() -> None:
+        # A paired phone in a PIN window: Wi-Fi only, and the PIN screen is left as it was.
+        phone = paired_phone(allow_pin=True)
+        s, backend = phone.session, phone.backend
+        phone.handshake(token_secret(PHONE_TOKEN))
+        assert (await phone.token_verify())[0]["evt"] == "token_verified"
+        await phone.send({"cmd": "wifi_connect", "ssid": "NewHome", "psk": "hunter22"})
+        phone.events()
+        await phone.send({"cmd": "finish_provisioning"})
+        assert phone.events() == [{"evt": "bye"}]
+        assert not s.done.is_set(), "the PIN window stays open for the new phone"
+        assert [st for st, _ in backend.statuses] == ["connected", "waiting"]
+
+        # Then the new phone pairs with the PIN, exactly as before.
+        backend.statuses.clear()
+        phone.handshake(s.pin)
+        verified = await phone.verify()
+        assert verified["evt"] == "pin_verified" and verified["api_token"].startswith("token-")
+        assert backend.registered == [("Pixel", "Pixel 9 Pro")]
+        await phone.send({"cmd": "push_secrets", "secrets": {"ANTHROPIC_API_KEY": "sk"}})
+        assert phone.events() == [{"evt": "secrets_saved", "keys": ["ANTHROPIC_API_KEY"]}]
+        await phone.send({"cmd": "finish_provisioning"})
+        assert phone.events() == [{"evt": "bye"}] and s.done.is_set()
+        assert [st for st, _ in backend.statuses] == ["connected", "verified", "done"]
+
+    asyncio.run(scenario())
+
+
+def test_the_other_modes_proof_is_a_failed_attempt() -> None:
+    async def scenario() -> None:
+        # token_verify on PIN keys...
+        phone = paired_phone(allow_pin=True)
+        s = phone.session
+        phone.handshake(s.pin)
+        await phone.token_verify()
+        assert s.failures == 1 and not s.verified and s.paired_device_id == ""
+        # ...and pin_verify on token keys (the mode is already decided by the keys).
+        phone = paired_phone(allow_pin=True)
+        s = phone.session
+        phone.handshake(token_secret(PHONE_TOKEN))
+        await phone.send({"cmd": "pin_verify", "proof": crypto.client_proof(phone.keys).hex()})
+        assert phone.notified == [] and s.failures == 1 and not s.verified
+        # A command before the proof counts too.
+        await phone.send({"cmd": "wifi_scan"})
+        assert s.failures == 2 and phone.notified == []
+        assert (await phone.token_verify())[0]["evt"] == "token_verified"
+        assert s.failures == 0
+
+    asyncio.run(scenario())

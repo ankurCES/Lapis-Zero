@@ -241,4 +241,85 @@ class BleEnvelopeCryptoVectorTest {
             BleEnvelopeCrypto.computeShared(b, BleEnvelopeCrypto.publicKey(a)),
         )
     }
+    // ------------------------------------------------------------------ paired-phone mode (4.2)
+
+    private val p = TestVectors.paired
+    private val pd = TestVectors.pairedDerived
+    private val apiToken = p.str("api_token")
+
+    private fun pairedKeys(token: String = apiToken): BleEnvelopeCrypto.SessionKeys {
+        val shared = BleEnvelopeCrypto.computeShared(clientPriv, devicePub)
+        return BleEnvelopeCrypto.deriveKeysWithToken(
+            shared, clientPub, devicePub, clientNonce, deviceNonce, BleEnvelopeCrypto.pairedSecret(token),
+        )
+    }
+
+    @Test
+    fun `paired secret is tok plus the lowercase hex sha256 of the token`() {
+        val secret = BleEnvelopeCrypto.pairedSecret(apiToken)
+        assertEquals(p.str("secret"), secret)
+        assertEquals("tok:" + p.str("token_hash_hex"), secret)
+        assertEquals(68, secret.length)
+        assertTrue(BleEnvelopeCrypto.isPairedSecret(secret))
+        assertFalse(BleEnvelopeCrypto.isPairedSecret(secret.uppercase()))
+        assertFalse(BleEnvelopeCrypto.isPairedSecret(pin))
+    }
+
+    @Test
+    fun `paired salt and keys match the python reference`() {
+        val transcript = BleEnvelopeCrypto.transcript(clientPub, devicePub, clientNonce, deviceNonce)
+        val salt = java.security.MessageDigest.getInstance("SHA-256")
+            .digest(transcript + p.str("secret").toByteArray(Charsets.US_ASCII))
+        assertArrayEquals(pd.hex("salt_hex"), salt)
+        val keys = pairedKeys()
+        assertArrayEquals(pd.hex("k_c2d_hex"), keys.kC2d)
+        assertArrayEquals(pd.hex("k_d2c_hex"), keys.kD2c)
+        assertArrayEquals(pd.hex("k_pin_hex"), keys.kPin)
+        assertArrayEquals(pd.hex("client_proof_hex"), BleEnvelopeCrypto.clientProof(keys))
+        assertArrayEquals(pd.hex("server_proof_hex"), BleEnvelopeCrypto.serverProof(keys))
+        // Not the PIN session's keys.
+        assertFalse(keys.kC2d.contentEquals(d.hex("k_c2d_hex")))
+    }
+
+    @Test
+    fun `token_verify envelope is byte identical to the python reference`() {
+        val keys = pairedKeys()
+        val plaintext = p.str("plaintext_utf8")
+        assertEquals("""{"cmd":"token_verify","proof":"${pd.str("client_proof_hex")}"}""", plaintext)
+        val envelope = BleEnvelopeCrypto.seal(keys.kC2d, dir, seq, plaintext.toByteArray(Charsets.UTF_8))
+        assertArrayEquals(pd.hex("envelope_hex"), envelope)
+        assertEquals(plaintext, BleEnvelopeCrypto.open(keys.kC2d, dir, pd.hex("envelope_hex"), seq).toString(Charsets.UTF_8))
+        // Another phone's token derives keys that cannot open it: the device just stays silent.
+        assertThrows(EnvelopeException::class.java) {
+            BleEnvelopeCrypto.open(pairedKeys("another-phone-token").kC2d, dir, envelope, seq)
+        }
+    }
+
+    @Test
+    fun `the client sends exactly the reference token_verify envelope`() = kotlinx.coroutines.test.runTest {
+        val writes = ArrayList<ByteArray>()
+        val transport = object : BleTransport {
+            override val attMtu = 517
+            override suspend fun writeHandshake(clientHello: ByteArray) {
+                assertArrayEquals(BleEnvelopeCrypto.buildHello(clientPub, clientNonce), clientHello)
+            }
+            override suspend fun readHandshake() = BleEnvelopeCrypto.buildHello(devicePub, deviceNonce)
+            override suspend fun writeCommand(frame: ByteArray) {
+                writes += frame
+            }
+            override val notifications = kotlinx.coroutines.flow.MutableSharedFlow<ByteArray>()
+        }
+        val random = object : java.security.SecureRandom() {
+            override fun nextBytes(bytes: ByteArray) {
+                clientNonce.copyInto(bytes)
+            }
+        }
+        val client = ProvisioningClient(transport, random, newPrivateKey = { clientPriv.copyOf() })
+        client.handshake()
+        // Nothing answers here, so the client gives up (the device's silence) after its timeout.
+        assertEquals(TokenResult.NotPaired, client.verifyToken(apiToken, timeoutMs = 1_000))
+        val frame = writes.single()
+        assertEquals(ChunkFraming.FLAG_ENCRYPTED, frame[3].toInt())
+        assertArrayEquals(pd.hex("envelope_hex"), frame.copyOfRange(4, frame.size))
+    }
 }

@@ -124,6 +124,11 @@ def parse_wireless_rssi(text: str, iface: str = "wlan0") -> int | None:
     return None
 
 
+def wifi_rssi(iface: str = "wlan0") -> int | None:
+    """The current Wi-Fi signal in dBm, or None when not associated."""
+    return parse_wireless_rssi(_read("/proc/net/wireless"), iface)
+
+
 def parse_meminfo(text: str) -> dict[str, int]:
     """MemTotal / MemAvailable / SwapTotal / SwapFree in MiB."""
     kb = {}
@@ -259,7 +264,7 @@ class SystemStatus:
                 "daemon_rss_mb": rss_mb(),
                 "ui_rss_mb": rss_mb(ui_pid.split()[0]) if ui_pid.split() else 0,
             },
-            "wifi": {**self.wifi, "rssi_dbm": parse_wireless_rssi(_read("/proc/net/wireless"))},
+            "wifi": {**self.wifi, "rssi_dbm": wifi_rssi()},
             "tailscale": {k: v for k, v in self.tailscale.items() if k != "auth_url"},
             "uptime_sec": int(float(sys_uptime[0])) if sys_uptime else uptime,
             "services": {

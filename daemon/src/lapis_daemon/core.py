@@ -41,7 +41,7 @@ from lapis_daemon.frames import FrameStore
 from lapis_daemon.kvm import device_key
 from lapis_daemon.kvm.base import HostDriver, MockHostDriver, build_host_driver, ssh_setup_hint
 from lapis_daemon.llm.base import build_planner
-from lapis_daemon.system_status import SystemStatus, run_cmd
+from lapis_daemon.system_status import SystemStatus, run_cmd, wifi_rssi
 
 Sink = Callable[[dict[str, Any]], None]
 # Each refresh spawns `nmcli` and `tailscale`: poll quickly only while the
@@ -55,6 +55,13 @@ BLE_ERROR_TTL_SEC = 120  # how long "Bluetooth unavailable" stays on the pairing
 # most RuntimeMaxSec=960 s and every status event re-arms this): the LCD must not
 # show a dead PIN, with the backlight held on, for good.
 BLE_VIEW_BACKSTOP_SEC = 1020
+BLE_UNIT = "lapis-ble-prov.service"
+# The phone Wi-Fi window opens by itself once Wi-Fi has had no connection this long.
+OFFLINE_BLE_AFTER_SEC = 30.0
+MOCK_NETWORKS = (
+    {"ssid": "HomeWiFi", "rssi": -58, "secured": True},
+    {"ssid": "Cafe Guest", "rssi": -71, "secured": False},
+)
 SCREEN_TIMEOUT_SEC = 2.5
 MOCK_STEP_DELAY_SEC = 0.8  # how long a mock step "takes", so ticker and screens are watchable
 
@@ -157,6 +164,10 @@ class Core:
         # host, both miss it, and both add it.
         self._authorizing = asyncio.Lock()
         self._file_secrets: set[str] = set()
+        self._wifi_ble_until = 0.0  # epoch end of the phone Wi-Fi window (0 = closed)
+        self._offline_since: float | None = None  # monotonic start of this Wi-Fi outage
+        self._offline_handled = False  # the window was considered for this outage already
+        self._mock_saved = ["HomeWiFi"]
 
     # -- lifecycle -------------------------------------------------------------
 
@@ -243,7 +254,11 @@ class Core:
                 with contextlib.suppress(Exception):
                     self._served = await self.net.tailscale_serve()
                     _log(f"tailscale serve: {'active' if self._served else 'nothing stored'}")
-            await asyncio.sleep(STATUS_REFRESH_STEADY_SEC if online else STATUS_REFRESH_SETUP_SEC)
+            if not self.mock:
+                with contextlib.suppress(Exception):
+                    await self._watch_offline(time.monotonic())
+            steady = online and self.status.wifi["ssid"]  # an outage is timed in 15 s steps
+            await asyncio.sleep(STATUS_REFRESH_STEADY_SEC if steady else STATUS_REFRESH_SETUP_SEC)
 
     # -- agent -----------------------------------------------------------------
 
@@ -574,10 +589,18 @@ class Core:
             )
         else:
             # The BLE service owns the PIN; it reports in over the Unix socket.
+            try:
+                previous = self._ble_mode("pin")
+            except OSError as exc:
+                self._ble_unavailable(f"cannot write {self.paths.ble_mode_file}: {exc}")
+                return self.pairing or {"type": "pairing", "mode": "off"}
+            # A PIN window replaces the phone Wi-Fi window (it serves paired phones too).
+            verb = "restart" if previous == "wifi" else "start"
+            self._wifi_ble_until = 0.0
             # reset-failed: an explicit request must not be refused by an old start-limit hit.
-            await run_cmd("systemctl", "reset-failed", "lapis-ble-prov.service")
-            rc, _ = await run_cmd("systemctl", "--no-block", "start", "lapis-ble-prov.service")
-            _log(f"pairing: Bluetooth window requested (systemctl exit {rc})")
+            await run_cmd("systemctl", "reset-failed", BLE_UNIT)
+            rc, _ = await run_cmd("systemctl", "--no-block", verb, BLE_UNIT)
+            _log(f"pairing: Bluetooth window requested (systemctl {verb} exit {rc})")
             if rc:
                 self._ble_unavailable(f"cannot start lapis-ble-prov (systemctl exit {rc})")
             elif not (self.pairing and self.pairing.get("mode") == "pin" and self.pairing["pin"]):
@@ -590,7 +613,7 @@ class Core:
     async def pairing_stop(self) -> None:
         self.auth.cancel_nonces()
         if not self.mock and self.pairing is not None and self.pairing.get("mode") == "pin":
-            await run_cmd("systemctl", "--no-block", "stop", "lapis-ble-prov.service")
+            await run_cmd("systemctl", "--no-block", "stop", BLE_UNIT)
         self._set_pairing(None)
 
     def on_pairing_event(self, msg: dict[str, Any]) -> None:
@@ -613,6 +636,132 @@ class Core:
         self.toast("warn", f"Bluetooth unavailable: {reason}"[:120])
         view = {**_ble_view("Bluetooth unavailable"), "error": reason[:120]}
         self._set_pairing(view, BLE_ERROR_TTL_SEC)
+
+    # -- Wi-Fi and the phone Wi-Fi window (BLE_PROVISIONING_PROTOCOL.md 4.2) ----
+    # Journal lines may name the network, never the password.
+
+    def _ble_mode(self, mode: str) -> str:
+        """Tell the next lapis-ble-prov start its mode (`pin` | `wifi`); returns the last one."""
+        path = self.paths.ble_mode_file
+        previous = ""
+        with contextlib.suppress(OSError):
+            previous = path.read_text().strip()
+        path.write_text(f"{mode}\n")
+        return previous
+
+    def _pin_window_open(self) -> bool:
+        return bool(
+            self.pairing and self.pairing.get("mode") == "pin" and not self.pairing.get("error")
+        )
+
+    def wifi_ble_state(self) -> dict[str, Any]:
+        """Is the device listening for a paired phone over Bluetooth, and until when."""
+        now = time.time()
+        if self._pin_window_open():
+            assert self.pairing is not None
+            return {
+                "open": True,
+                "expires_at": int(self.pairing.get("expires_at") or now + BLE_WINDOW_SEC),
+            }
+        if self._wifi_ble_until > now:
+            return {"open": True, "expires_at": int(self._wifi_ble_until)}
+        return {"open": False, "expires_at": 0}
+
+    async def wifi_ble_open(self) -> None:
+        """Open the phone Wi-Fi window: paired phones only, nothing on the pairing screen.
+
+        RuntimeError when the Bluetooth service cannot be started.
+        """
+        if self._pin_window_open() or self._wifi_ble_until > time.time():
+            return  # already listening for paired phones
+        if not self.mock:
+            try:
+                self._ble_mode("wifi")
+            except OSError as exc:
+                raise RuntimeError(f"cannot write {self.paths.ble_mode_file}") from exc
+            await run_cmd("systemctl", "reset-failed", BLE_UNIT)
+            rc, _ = await run_cmd("systemctl", "--no-block", "start", BLE_UNIT)
+            _log(f"wifi: phone Wi-Fi window requested (systemctl exit {rc})")
+            if rc:
+                raise RuntimeError(f"cannot start lapis-ble-prov (systemctl exit {rc})")
+        # Until the process reports its own end (`wifi_ble` over the socket).
+        self._wifi_ble_until = time.time() + BLE_WINDOW_SEC
+
+    def on_wifi_ble(self, msg: dict[str, Any]) -> None:
+        """From lapis-ble-prov in the phone Wi-Fi window: still open (and until when), or gone."""
+        if msg.get("open"):
+            with contextlib.suppress(TypeError, ValueError):
+                self._wifi_ble_until = float(msg.get("expires_at") or 0)
+            return
+        self._wifi_ble_until = 0.0
+        if msg.get("error"):
+            _log(f"wifi: phone Wi-Fi window: Bluetooth unavailable: {str(msg['error'])[:120]}")
+
+    async def _watch_offline(self, now: float) -> None:
+        """Open the phone Wi-Fi window once per outage of 30 s, on a device with a paired phone."""
+        if self.status.wifi["ssid"]:
+            self._offline_since, self._offline_handled = None, False  # re-armed
+            return
+        if self._offline_since is None:
+            self._offline_since = now
+        if self._offline_handled or now - self._offline_since < OFFLINE_BLE_AFTER_SEC:
+            return
+        self._offline_handled = True
+        if await self.auth.count() == 0:
+            return  # (an unpaired device gets its PIN window instead)
+        _log("wifi: no connection for 30 s, opening the phone Wi-Fi window")
+        try:
+            await self.wifi_ble_open()
+        except RuntimeError as exc:
+            _log(f"wifi: phone Wi-Fi window unavailable: {exc}")
+
+    async def wifi_info(self) -> dict[str, Any]:
+        """`GET /v1/wifi`: the current network, the saved profiles, the phone Wi-Fi window."""
+        if self.mock:
+            wifi, rssi = self.status.wifi, -58
+            saved = [{"name": n, "active": n == wifi["ssid"]} for n in self._mock_saved]
+        else:
+            wifi, saved = await asyncio.gather(self.net.wifi_status(), self.net.wifi_saved())
+            rssi = await asyncio.to_thread(wifi_rssi)
+        return {
+            "ssid": wifi["ssid"],
+            "ip": wifi["ip"],
+            "rssi": rssi if wifi["ssid"] else None,
+            "saved": saved,
+            "ble": self.wifi_ble_state(),
+        }
+
+    async def wifi_scan(self) -> list[dict[str, Any]]:
+        """Nearby networks, strongest first (<= 20). RuntimeError when Wi-Fi is unavailable."""
+        if self.mock:
+            return [dict(n) for n in MOCK_NETWORKS]
+        return await self.net.wifi_scan()
+
+    async def wifi_connect(self, ssid: str, psk: str | None, by: str) -> dict[str, Any]:
+        """Join `ssid`; the profile is kept only when it worked. Never logs `psk`."""
+        if self.mock:  # never the developer's own Wi-Fi
+            result = {"state": "connected", "local_ip": "192.168.1.42"}
+            self.status.wifi = {"ssid": ssid, "ip": result["local_ip"]}
+            self._mock_saved = [*(n for n in self._mock_saved if n != ssid), ssid]
+        else:
+            result = await self.net.wifi_connect(ssid, psk)
+            with contextlib.suppress(Exception):
+                await self.status.refresh()
+        _log(f"wifi_connect ssid={ssid!r} state={result['state']} by={by}")
+        self.broadcast_state()
+        return result
+
+    async def wifi_forget(self, name: str, by: str) -> dict[str, Any]:
+        """Delete a saved Wi-Fi profile; LookupError when there is none by that name."""
+        names = self._mock_saved if self.mock else [s["name"] for s in await self.net.wifi_saved()]
+        if name not in names:
+            raise LookupError("No saved Wi-Fi network by that name")
+        if self.mock:
+            self._mock_saved.remove(name)
+        else:
+            await self.net.wifi_forget(name)
+        _log(f"wifi_forget name={name!r} by={by}")
+        return await self.wifi_info()
 
     async def pair_exchange(self, nonce: str, name: str, model: str) -> tuple[str, str] | None:
         if not self.auth.consume_nonce(nonce):

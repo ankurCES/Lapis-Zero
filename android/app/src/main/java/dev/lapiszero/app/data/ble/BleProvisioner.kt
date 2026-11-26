@@ -75,7 +75,7 @@ class BleProvisioner(context: Context) {
         val callback = object : ScanCallback() {
             override fun onScanResult(callbackType: Int, result: ScanResult) {
                 // The advertised local name needs no extra permission, unlike BluetoothDevice.name.
-                val name = result.scanRecord?.deviceName?.takeIf { it.isNotBlank() } ?: "CardputerZero"
+                val name = result.scanRecord?.deviceName?.takeIf { it.isNotBlank() } ?: "Lapis device"
                 found[result.device.address] = FoundDevice(result.device, name, result.rssi)
                 trySend(found.values.sortedByDescending { it.rssi })
             }

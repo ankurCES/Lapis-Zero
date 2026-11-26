@@ -35,5 +35,21 @@
       "aad_hex": "010100000001",
       "envelope_hex": "00000001ea84c7dc7c23e0dafd7c51250183d07a0c49218ed89665e66106c296ddf79a8263431d"
     }
+  },
+  "paired_vector": {
+    "comment": "crypto_vector keys, nonces, seq and dir; secret replaces the PIN",
+    "api_token": "lapis-paired-phone-test-token-0123456789AB",
+    "token_hash_hex": "2059acdcdcda41ea37690250c3ef95e93477b8e7ca38873d3060a0d73b748e9b",
+    "secret": "tok:2059acdcdcda41ea37690250c3ef95e93477b8e7ca38873d3060a0d73b748e9b",
+    "plaintext_utf8": "{\"cmd\":\"token_verify\",\"proof\":\"75017af529a8a56a0f85a46247c6b239097d7250a62c6891fcf8ffde2b114821\"}",
+    "derived": {
+      "salt_hex": "87567d44295e7291d9ec8c830f10309e6d480296a8a17b9de8fdf7a78f12e1aa",
+      "k_c2d_hex": "676faffbe1889104532d40f5738fdfffaeb049e8ad9650aadc52a977b7c0375d",
+      "k_d2c_hex": "758c4aee6b83cf59c00a8addb9c2d75c56b2942c9b7db73a07a05a2fb0b298a0",
+      "k_pin_hex": "d20970b5700961a2e96f8b7476fd88da1e049febcd5307e2d3ef34624c3425e5",
+      "client_proof_hex": "75017af529a8a56a0f85a46247c6b239097d7250a62c6891fcf8ffde2b114821",
+      "server_proof_hex": "0efeda1141d0211d9454aac69979608add879fe82d553a16ff7fa080063fe206",
+      "envelope_hex": "00000001b0c51f6c4d752492f33ec0f97e45e81dd6ae1ec6cd293fa73ea05039bf5a70b8320a391f30a79828f979081a204f23accf5578767ccb158d446e02abec805038b25ddf11a9ae5fd1b255c127c12ae832b77359886c39fd466e4ca491701d0c7c7de817a5373adff0a5159361508e6e1602"
+    }
   }
 }

@@ -511,6 +511,11 @@ class EffectivePaths:
         """The device's own SSH private key: next to the database, in a 0700 directory."""
         return self.db_path.parent / "ssh" / "id_ed25519"
 
+    @property
+    def ble_mode_file(self) -> Path:
+        """Written by the daemon before each lapis-ble-prov start: `pin` or `wifi` (tmpfs)."""
+        return self.socket_path.parent / "ble-prov.mode"
+
 
 def effective_paths(config: str | None = None) -> EffectivePaths:
     """Resolve paths; LAPIS_CONFIG_DIR relocates everything for rootless dev and tests."""

@@ -20,6 +20,10 @@ import kotlinx.serialization.json.put
  * `daemon/src/lapis_daemon/ble_prov/session.py` (handshake, strict `seq == expected`, silent
  * failures, three-strike lockout with rotation, error events), so the phone-side client is
  * exercised against the device's real behaviour without Bluetooth.
+ *
+ * Paired-phone mode (protocol section 4.2): the first envelope is tried with every candidate key
+ * set (the PIN's while [pinOnScreen], and one per token in [pairedTokens]); the first that opens
+ * decides the session's mode. A token session may only scan, join Wi-Fi and finish.
  */
 class FakeLapisDevice(var pin: String = "482917") {
     private var privateKey = BleEnvelopeCrypto.generatePrivateKey()
@@ -29,6 +33,18 @@ class FakeLapisDevice(var pin: String = "482917") {
         private set
 
     private var keys: BleEnvelopeCrypto.SessionKeys? = null
+    private var candidates: List<Pair<String, BleEnvelopeCrypto.SessionKeys>> = emptyList()
+    private var helloSeen = false
+
+    /** Tokens of the phones this device paired (the daemons keep only their SHA-256). */
+    val pairedTokens = ArrayList<String>()
+
+    /** A PIN is on screen, so PIN pairing is accepted next to paired phones. */
+    var pinOnScreen = true
+
+    /** "pin" or "token": decided by the key set that opened the first envelope. */
+    var mode: String? = null
+        private set
     private var rxSeq = 1L
     private var txSeq = 0L
     private var txMsg = 0
@@ -118,6 +134,9 @@ class FakeLapisDevice(var pin: String = "482917") {
         publicKey = BleEnvelopeCrypto.publicKey(privateKey)
         deviceNonce = ByteArray(16) { (0xA0 + rotations + it).toByte() }
         keys = null
+        candidates = emptyList()
+        helloSeen = false
+        mode = null
         verified = false
         failures = 0
         rx.reset()
@@ -127,7 +146,16 @@ class FakeLapisDevice(var pin: String = "482917") {
     private fun handshakeWrite(data: ByteArray) {
         val hello = BleEnvelopeCrypto.parseHello(data)
         val shared = BleEnvelopeCrypto.computeShared(privateKey, hello.publicKey)
-        keys = BleEnvelopeCrypto.deriveKeys(shared, hello.publicKey, publicKey, hello.nonce, deviceNonce, pin)
+        candidates = buildList {
+            if (pinOnScreen) add("pin" to BleEnvelopeCrypto.deriveKeys(shared, hello.publicKey, publicKey, hello.nonce, deviceNonce, pin))
+            pairedTokens.forEach {
+                val secret = BleEnvelopeCrypto.pairedSecret(it)
+                add("token" to BleEnvelopeCrypto.deriveKeysWithToken(shared, hello.publicKey, publicKey, hello.nonce, deviceNonce, secret))
+            }
+        }
+        keys = null
+        mode = null
+        helloSeen = true
         rxSeq = 1
         txSeq = 0
         txMsg = 0
@@ -146,17 +174,31 @@ class FakeLapisDevice(var pin: String = "482917") {
 
             else -> return
         }
-        val sessionKeys = keys
-        if (message.flags and ChunkFraming.FLAG_ENCRYPTED == 0 || sessionKeys == null) {
+        val decided = keys
+        if (message.flags and ChunkFraming.FLAG_ENCRYPTED == 0 || !helloSeen) {
             link?.notify(ChunkFraming.resetFrame())
             return
         }
-        val command = try {
-            val plain = BleEnvelopeCrypto.open(sessionKeys.kC2d, BleEnvelopeCrypto.DIR_C2D, message.payload, rxSeq)
-            Json.parseToJsonElement(plain.toString(Charsets.UTF_8)).jsonObject
+        fun tryOpen(k: BleEnvelopeCrypto.SessionKeys): ByteArray? = try {
+            BleEnvelopeCrypto.open(k.kC2d, BleEnvelopeCrypto.DIR_C2D, message.payload, rxSeq)
         } catch (e: EnvelopeException) {
-            failure() // a wrong PIN derives the wrong key, so it shows up right here
+            null
+        }
+        var plain = decided?.let(::tryOpen)
+        if (decided == null) {
+            for ((m, k) in candidates) {
+                plain = tryOpen(k) ?: continue
+                keys = k
+                mode = m
+                break
+            }
+        }
+        if (plain == null) {
+            failure() // a wrong PIN (or an unknown token) derives the wrong key, so it shows up right here
             return
+        }
+        val command = try {
+            Json.parseToJsonElement(plain.toString(Charsets.UTF_8)).jsonObject
         } catch (e: IllegalArgumentException) {
             failure()
             return
@@ -205,8 +247,13 @@ class FakeLapisDevice(var pin: String = "482917") {
 
     private fun dispatch(command: JsonObject) {
         val cmd = str(command, "cmd")
-        if (cmd == "pin_verify") {
-            pinVerify(command)
+        if (cmd == "pin_verify" || cmd == "token_verify") {
+            // pin_verify in a token-keyed session, or token_verify in a PIN-keyed one: a failed attempt.
+            when {
+                (cmd == "pin_verify") != (mode == "pin") -> failure()
+                cmd == "pin_verify" -> pinVerify(command)
+                else -> tokenVerify(command)
+            }
             return
         }
         if (!verified) {
@@ -214,6 +261,10 @@ class FakeLapisDevice(var pin: String = "482917") {
             return
         }
         if (cmd in mute) return
+        if (mode == "token" && cmd !in PAIRED_COMMANDS) {
+            error(cmd, "not allowed for a paired phone")
+            return
+        }
         when (cmd) {
             "wifi_scan" ->
                 if (wifiScanFails) {
@@ -270,6 +321,23 @@ class FakeLapisDevice(var pin: String = "482917") {
 
             else -> error(cmd, "unknown command")
         }
+    }
+
+    private fun tokenVerify(command: JsonObject) {
+        val sessionKeys = keys ?: return
+        val proof = str(command, "proof").hexToBytesOrNull() ?: ByteArray(0)
+        if (!BleEnvelopeCrypto.constantTimeEquals(proof, BleEnvelopeCrypto.clientProof(sessionKeys))) {
+            failure()
+            return
+        }
+        verified = true
+        failures = 0
+        val serverProof = BleEnvelopeCrypto.serverProof(sessionKeys).also { if (lieAboutProof) it[0] = (it[0].toInt() xor 1).toByte() }
+        send(buildJsonObject { put("evt", "token_verified"); put("proof", serverProof.toHex()); put("device_id", "dev_01") })
+    }
+
+    private companion object {
+        val PAIRED_COMMANDS = setOf("wifi_scan", "wifi_connect", "finish_provisioning")
     }
 
     private fun pinVerify(command: JsonObject) {

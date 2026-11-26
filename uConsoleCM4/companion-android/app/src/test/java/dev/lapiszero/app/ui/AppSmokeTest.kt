@@ -152,7 +152,7 @@ class AppSmokeTest {
         shadowOf(context.packageManager)
             .addActivityIfNotPresent(ComponentName(context, ComponentActivity::class.java))
         scenario = ActivityScenario.launch(ComponentActivity::class.java)
-        container = AppContainer(context, MemorySecureStore())
+        container = AppContainer(context, MemorySecureStore(), MemorySecureStore())
     }
 
     @After
@@ -241,6 +241,12 @@ class AppSmokeTest {
                 "prompt": "Check overnight CI runs and summarize any failures.", "enabled": false, "next_run": null, "last_run_at": null, "last_chat_id": null}]}""",
         )
         "GET /v1/devices" -> jsonResponse("""{"devices": [{"id": "dev_local", "name": "Dev token", "model": "dev", "created_at": 1795541234, "last_seen_at": 1795541240, "revoked": false, "current": true}]}""")
+        "GET /v1/wifi" -> jsonResponse(
+            """{"ssid": "HomeWiFi", "ip": "192.168.1.42", "rssi": -58, "saved": [{"name": "HomeWiFi", "active": true},
+                {"name": "Office", "active": false}], "ble": {"open": false, "expires_at": 0}}""",
+        )
+        "GET /v1/wifi/scan" -> jsonResponse("""{"networks": [{"ssid": "Office", "rssi": -61, "secured": true}, {"ssid": "cafe guest", "rssi": -71, "secured": false}]}""")
+        "POST /v1/wifi/connect" -> jsonResponse("""{"state": "connected", "local_ip": "10.0.0.7"}""")
         "POST /v1/approvals/req_1" -> jsonResponse("""{"ok": true}""")
         "POST /v1/agent/kill-all" -> jsonResponse("""{"ok": true}""")
         "POST /v1/approvals/req_2" -> jsonResponse("""{"ok": true}""")
@@ -401,6 +407,55 @@ class AppSmokeTest {
         waitFor("Secrets vault")
         tap("KVM hosts")
         waitFor("Test connection")
+    }
+
+    @Test
+    fun `change wifi opens from the device tab and joins a network without keeping the password`() {
+        pairWithMock()
+        show()
+        waitForChats()
+        tap("Device")
+        waitFor("Battery (BQ27220)")
+        tap("Change Wi-Fi")
+        waitFor("NETWORKS NEARBY")
+        waitFor("Office")
+        compose.onNodeWithText("SAVED NETWORKS").assertExists()
+        compose.onNodeWithText("IN USE").assertExists()
+        compose.onNodeWithText("Let my phone set it over Bluetooth").assertExists()
+        // The nearby network (the saved profile of the same name is not a button).
+        compose.onNode(hasClickAction() and hasText("Office")).performScrollTo().performClick()
+        waitFor("Password for Office")
+        field("Password for Office").performTextReplacement("correct horse 42")
+        assertMasked("correct horse 42")
+        press("Connect")
+        waitFor("joined Office")
+        waitFor("10.0.0.7")
+        assertTrue("the password went out once", sent.count { (key, body) -> key == "POST /v1/wifi/connect" && body.contains("correct horse 42") } == 1)
+        assertEquals(0, shown("correct horse 42"))
+    }
+
+    @Test
+    fun `hosts can be saved to and copied from the other paired devices`() {
+        // A second paired device that does not answer: it is offered, and reported, as such.
+        val closed = java.net.ServerSocket(0).use { it.localPort }
+        container.devices.add("LapisZero-9C1B", Endpoint("127.0.0.1:$closed", tls = false), "token-other", "dev_o")
+        pairWithMock()
+        show()
+        openHosts()
+        tap("Copy hosts from another device")
+        waitFor("unreachable")
+        compose.onNodeWithText("LAPISZERO-9C1B").assertExists()
+        press("Cancel")
+        press("Add host")
+        waitFor("SAVE TO")
+        compose.onNodeWithText("devbox (this device)").assertExists()
+        compose.onNodeWithText("LapisZero-9C1B").assertExists()
+        field("Host id").performTextReplacement("mac-mini")
+        field("Display hostname").performTextReplacement("Mac mini")
+        field("Tailscale IP").performTextReplacement("100.64.0.9")
+        compose.onNodeWithText("LapisZero-9C1B").performScrollTo().performClick()
+        press("Save")
+        waitFor("Host mac-mini: saved on devbox; LapisZero-9C1B unreachable", 30_000)
     }
 
     @Test
@@ -738,7 +793,11 @@ class AppSmokeTest {
     fun `dev connect pairs from the welcome screen and opens the workspace`() {
         container.sessions.start()
         show()
-        waitFor("Pair a new CardputerZero")
+        waitFor("Pair a new Lapis Zero")
+        compose.onNodeWithText("Supported devices").assertExists()
+        compose.onNodeWithText("• CardputerZero (M5Stack)").assertExists()
+        compose.onNodeWithText("• uConsole (ClockworkPi, CM4)").assertExists()
+        compose.onNodeWithText("LAPIS ZERO").assertExists()
         compose.onNodeWithText("Pair an existing device").assertExists()
         tap("Dev connect")
         waitFor("Pairing token")
@@ -777,8 +836,8 @@ class AppSmokeTest {
     fun `bluetooth wizard opens and explains what it needs`() {
         container.sessions.start()
         show()
-        waitFor("Pair a new CardputerZero")
-        tap("Pair a new CardputerZero")
+        waitFor("Pair a new Lapis Zero")
+        tap("Pair a new Lapis Zero")
         waitFor("Pair over Bluetooth")
         compose.onNodeWithText("Find").assertExists()
         compose.onNodeWithText("Verify").assertExists()

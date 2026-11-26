@@ -100,7 +100,12 @@ private fun powerChoices(isDeck: Boolean): List<PowerChoice> {
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-fun DeviceScreen(session: LapisSession, snackbar: SnackbarHostState, isDeck: Boolean = false) {
+fun DeviceScreen(
+    session: LapisSession,
+    snackbar: SnackbarHostState,
+    isDeck: Boolean = false,
+    onChangeWifi: () -> Unit = {},
+) {
     val vm: DeviceViewModel = viewModel(
         factory = viewModelFactory { initializer { DeviceViewModel(session.repo, session.api) } },
     )
@@ -139,8 +144,13 @@ fun DeviceScreen(session: LapisSession, snackbar: SnackbarHostState, isDeck: Boo
         SectionTitle("Telemetry")
         if (telemetry == null) {
             Text("Waiting for telemetry…", style = MaterialTheme.typography.bodyMedium, color = lapis.muted)
+            // Offline is exactly when a new network may be what the device needs.
+            LapisCard(Modifier.fillMaxWidth()) {
+                Text("Wi-Fi", style = MaterialTheme.typography.titleSmall)
+                ChangeWifiButton(onChangeWifi)
+            }
         } else {
-            TelemetryCards(telemetry, isDeck)
+            TelemetryCards(telemetry, isDeck, onChangeWifi)
         }
 
         SectionTitle("Display & sound")
@@ -320,7 +330,7 @@ private fun PairingCard(pairing: Pairing, onStop: () -> Unit) {
 }
 
 @Composable
-private fun TelemetryCards(t: Telemetry, isDeck: Boolean) {
+private fun TelemetryCards(t: Telemetry, isDeck: Boolean, onChangeWifi: () -> Unit) {
     val battery = t.battery
     LapisCard(Modifier.fillMaxWidth()) {
         Text(if (isDeck) "Battery (AXP228)" else "Battery (BQ27220)", style = MaterialTheme.typography.titleSmall)
@@ -374,6 +384,7 @@ private fun TelemetryCards(t: Telemetry, isDeck: Boolean) {
         KeyValueRow("Network", t.wifi.ssid.ifEmpty { "not connected" })
         KeyValueRow("Address", t.wifi.ip.ifEmpty { "n/a" })
         KeyValueRow("Signal", t.wifi.rssiDbm?.let { "$it dBm" } ?: "n/a")
+        ChangeWifiButton(onChangeWifi)
     }
     LapisCard(Modifier.fillMaxWidth()) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -392,6 +403,12 @@ private fun TelemetryCards(t: Telemetry, isDeck: Boolean) {
             }
         }
     }
+}
+
+/** Into "Change Wi-Fi": over the API while the device answers, over Bluetooth when it does not. */
+@Composable
+private fun ChangeWifiButton(onClick: () -> Unit) {
+    OutlinedButton(onClick = onClick, modifier = Modifier.fillMaxWidth().padding(top = 4.dp)) { Text("Change Wi-Fi") }
 }
 
 @Composable

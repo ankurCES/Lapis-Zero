@@ -127,6 +127,11 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/v1/deck/tools", get(list_tools))
         .route("/v1/deck/tools/invoke", post(invoke_tool))
         .route("/v1/deck/audit", get(audit))
+        .route("/v1/wifi", get(wifi))
+        .route("/v1/wifi/scan", get(wifi_scan))
+        .route("/v1/wifi/connect", post(wifi_connect))
+        .route("/v1/wifi/forget", post(wifi_forget))
+        .route("/v1/wifi/ble", post(wifi_ble))
         .route("/v1/policy/authorize", post(authorize))
         .route("/v1/internal/screen/{id}", post(screen_upload))
         .route("/v1/ws", get(crate::ws::handler))
@@ -362,6 +367,98 @@ async fn set_rail(
         .await
         .map_err(|e| ApiError(StatusCode::CONFLICT, "rail_failed", e))?;
     ok(json!({"ok": true, "rail": rail.name(), "on": b.on}))
+}
+
+// ---------------------------------------------------------------------- Wi-Fi
+// The owner's own network (HUD, app): like the rail toggles, audited and not gated.
+
+async fn wifi(State(app): State<Arc<App>>) -> ApiResult {
+    ok(app.wifi_view().await)
+}
+
+async fn wifi_scan(State(app): State<Arc<App>>) -> ApiResult {
+    let ctl = app.net_ctl.clone();
+    match tokio::task::spawn_blocking(move || ctl.wifi_scan()).await {
+        Ok(Ok(networks)) => ok(json!({"networks": networks})),
+        Ok(Err(e)) => Err(ApiError(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "wifi_unavailable",
+            e,
+        )),
+        Err(e) => Err(ApiError(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal",
+            e.to_string(),
+        )),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct WifiConnectBody {
+    #[serde(default)]
+    ssid: String,
+    #[serde(default)]
+    psk: Option<String>,
+}
+
+/// WPA-PSK passphrase rules: 8..63 printable ASCII, or 64 hex digits.
+pub fn valid_psk(psk: &str) -> bool {
+    let printable = psk.bytes().all(|b| (0x20..=0x7e).contains(&b));
+    (printable && (8..=63).contains(&psk.len()))
+        || (psk.len() == 64 && psk.bytes().all(|b| b.is_ascii_hexdigit()))
+}
+
+async fn wifi_connect(
+    State(app): State<Arc<App>>,
+    Extension(c): Extension<Caller>,
+    bytes: Bytes,
+) -> ApiResult {
+    let b: WifiConnectBody = body(&bytes)?;
+    let psk = b.psk.filter(|p| !p.is_empty());
+    if let Some(p) = &psk {
+        lapis_crypto::register_secret(p); // before anything can echo it
+    }
+    if b.ssid.is_empty() || b.ssid.len() > 32 || b.ssid.chars().any(char::is_control) {
+        return Err(invalid("ssid must be 1 to 32 bytes"));
+    }
+    if psk.as_deref().is_some_and(|p| !valid_psk(p)) {
+        return Err(invalid(
+            "The password must be 8 to 63 characters (or 64 hex digits)",
+        ));
+    }
+    ok(app.wifi_connect(b.ssid, psk, &c.by()).await)
+}
+
+#[derive(serde::Deserialize)]
+struct WifiForgetBody {
+    #[serde(default)]
+    name: String,
+}
+
+async fn wifi_forget(
+    State(app): State<Arc<App>>,
+    Extension(c): Extension<Caller>,
+    bytes: Bytes,
+) -> ApiResult {
+    let b: WifiForgetBody = body(&bytes)?;
+    if !app.wifi_forget(b.name.clone(), &c.by()).await {
+        return Err(not_found(format!("No saved network {:?}", b.name)));
+    }
+    ok(app.wifi_view().await)
+}
+
+async fn wifi_ble(State(app): State<Arc<App>>) -> ApiResult {
+    if app.auth.paired_count() == 0 {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "not_paired",
+            "No phone is paired with this device yet".into(),
+        ));
+    }
+    app.phone_window_start()
+        .await
+        .map_err(|e| ApiError(StatusCode::SERVICE_UNAVAILABLE, "ble_unavailable", e))?;
+    ok(app.wifi_view().await)
 }
 
 async fn list_tools() -> ApiResult {

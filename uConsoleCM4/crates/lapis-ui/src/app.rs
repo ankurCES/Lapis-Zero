@@ -380,6 +380,7 @@ impl DeckApp {
                 self.get("/v1/deck/gps", Tag::Gps);
             }
             FLEET => self.get("/v1/hosts", Tag::Hosts),
+            NET if self.section[NET] == 0 => self.get("/v1/wifi", Tag::Wifi),
             SYS => {
                 self.get("/v1/deck/status", Tag::DeckStatus);
                 self.get("/v1/devices", Tag::Devices);
@@ -524,6 +525,10 @@ impl DeckApp {
             (
                 "ADS-B aircraft table".into(),
                 Action::Tool("sdr.adsb_snapshot", json!({})),
+            ),
+            (
+                "Wi-Fi: join, forget, let my phone set it".into(),
+                Action::Section(NET, 0),
             ),
             (
                 "Wi-Fi survey (passive)".into(),

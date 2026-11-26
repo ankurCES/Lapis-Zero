@@ -19,8 +19,8 @@ class EnvelopeException(message: String, cause: Throwable? = null) : Exception(m
 
 /**
  * lapis-ble-v1 layer 2 (BLE_PROVISIONING_PROTOCOL.md section 3): X25519 ECDH, HKDF-SHA256
- * with a salt that binds both public keys, both nonces and the 6-digit PIN, one AES-256-GCM
- * key per direction and a PIN-proof HMAC key.
+ * with a salt that binds both public keys, both nonces and the 6-digit PIN (or, for a phone that
+ * is already paired, its [pairedSecret]), one AES-256-GCM key per direction and a proof HMAC key.
  *
  * Must stay byte-for-byte identical to `daemon/src/lapis_daemon/ble_prov/crypto.py`; both are
  * tested against `tests/vectors/ble_crypto_vectors.json`.
@@ -42,6 +42,8 @@ object BleEnvelopeCrypto {
     private val CLIENT_PROOF_LABEL = "client-pin-proof".toByteArray(Charsets.US_ASCII)
     private val SERVER_PROOF_LABEL = "server-pin-proof".toByteArray(Charsets.US_ASCII)
     private val PIN_RE = Regex("^[0-9]{6}$")
+    private const val PAIRED_PREFIX = "tok:"
+    private val PAIRED_SECRET_RE = Regex("^tok:[0-9a-f]{64}$")
 
     class Hello(val publicKey: ByteArray, val nonce: ByteArray)
 
@@ -124,11 +126,25 @@ object BleEnvelopeCrypto {
     /** salt = SHA256(transcript || ASCII(pin)). */
     fun salt(transcript: ByteArray, pin: String): ByteArray {
         if (!isValidPin(pin)) throw HandshakeException("PIN must be exactly 6 digits")
-        return MessageDigest.getInstance("SHA-256").run {
-            update(transcript)
-            digest(pin.toByteArray(Charsets.US_ASCII))
-        }
+        return secretSalt(transcript, pin)
     }
+
+    private fun secretSalt(transcript: ByteArray, secret: String): ByteArray =
+        MessageDigest.getInstance("SHA-256").run {
+            update(transcript)
+            digest(secret.toByteArray(Charsets.US_ASCII))
+        }
+
+    /**
+     * Paired-phone mode (protocol section 4.2): `"tok:" + lowercase hex SHA-256(api_token)`, the
+     * 68 ASCII characters that take the PIN's place in the salt. The device stores exactly that
+     * hash for each phone it paired, so neither side ever sends the token itself.
+     */
+    fun pairedSecret(apiToken: String): String =
+        PAIRED_PREFIX + MessageDigest.getInstance("SHA-256").digest(apiToken.toByteArray(Charsets.UTF_8))
+            .joinToString("") { "%02x".format(it.toInt() and 0xFF) }
+
+    fun isPairedSecret(secret: String): Boolean = PAIRED_SECRET_RE.matches(secret)
 
     fun deriveKeys(
         shared: ByteArray,
@@ -138,9 +154,34 @@ object BleEnvelopeCrypto {
         deviceNonce: ByteArray,
         pin: String,
     ): SessionKeys {
+        if (!isValidPin(pin)) throw HandshakeException("PIN must be exactly 6 digits")
+        return deriveKeysFor(shared, clientPub, devicePub, clientNonce, deviceNonce, pin)
+    }
+
+    /** The same key schedule keyed by a [pairedSecret] instead of the PIN. */
+    fun deriveKeysWithToken(
+        shared: ByteArray,
+        clientPub: ByteArray,
+        devicePub: ByteArray,
+        clientNonce: ByteArray,
+        deviceNonce: ByteArray,
+        pairedSecret: String,
+    ): SessionKeys {
+        if (!isPairedSecret(pairedSecret)) throw HandshakeException("not a paired-phone secret")
+        return deriveKeysFor(shared, clientPub, devicePub, clientNonce, deviceNonce, pairedSecret)
+    }
+
+    private fun deriveKeysFor(
+        shared: ByteArray,
+        clientPub: ByteArray,
+        devicePub: ByteArray,
+        clientNonce: ByteArray,
+        deviceNonce: ByteArray,
+        secret: String,
+    ): SessionKeys {
         requireNonZero(shared)
         val transcript = transcript(clientPub, devicePub, clientNonce, deviceNonce)
-        val salt = salt(transcript, pin)
+        val salt = secretSalt(transcript, secret)
         fun expand(info: ByteArray): ByteArray =
             Hkdf.computeHkdf("HMACSHA256", shared, salt, info, KEY_LEN)
         return SessionKeys(expand(INFO_C2D), expand(INFO_D2C), expand(INFO_PIN), transcript)

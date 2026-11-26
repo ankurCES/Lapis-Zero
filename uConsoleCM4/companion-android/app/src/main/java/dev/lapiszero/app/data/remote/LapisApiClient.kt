@@ -5,8 +5,12 @@ import java.util.concurrent.TimeUnit
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 import kotlinx.coroutines.suspendCancellableCoroutine
+import dev.lapiszero.app.data.ble.WifiNetwork
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import okhttp3.Call
 import okhttp3.Callback
 import okhttp3.HttpUrl
@@ -109,6 +113,11 @@ class LapisApiClient(
      */
     internal val toolHttp: OkHttpClient by lazy {
         http.newBuilder().readTimeout(TOOL_READ_TIMEOUT_S, TimeUnit.SECONDS).build()
+    }
+
+    /** `wifi/connect` only: long enough for the device's own 45 s, and a request with a PSK is never resent. */
+    internal val wifiHttp: OkHttpClient by lazy {
+        http.newBuilder().readTimeout(WIFI_READ_TIMEOUT_S, TimeUnit.SECONDS).retryOnConnectionFailure(false).build()
     }
 
     // -- health / devices
@@ -263,6 +272,32 @@ class LapisApiClient(
     suspend fun power(action: String): PowerResponse =
         send("POST", "v1/device/power", PowerRequest(action))
 
+    // -- Wi-Fi (both daemons; older software answers 404 for all of these)
+    suspend fun wifi(): WifiInfo = get("v1/wifi")
+
+    /** `503 wifi_unavailable` when the radio cannot scan. */
+    suspend fun wifiScan(): List<WifiNetwork> = get<WifiScanResponse>("v1/wifi/scan").networks
+
+    /**
+     * Joins a network (saved on the device only when it works). Takes up to about 45 s, and a
+     * phone that reaches the device over the old network may never see the answer: the caller
+     * treats a lost connection as "switching networks", not as a failure. `psk` null for an
+     * open network. Sent once, never retried by OkHttp ([wifiHttp]).
+     */
+    suspend fun wifiConnect(ssid: String, psk: String?): WifiConnectResult {
+        val body = buildJsonObject {
+            put("ssid", ssid)
+            put("psk", psk?.let(::JsonPrimitive) ?: JsonNull)
+        }.toString().toRequestBody(JSON)
+        return decode(execute(request("POST", "v1/wifi/connect", body = body), wifiHttp))
+    }
+
+    /** `404 not_found` when there is no such profile. */
+    suspend fun wifiForget(name: String): WifiInfo = send("POST", "v1/wifi/forget", WifiForgetRequest(name))
+
+    /** Opens the phone Wi-Fi window (Bluetooth, paired phones only); `409 not_paired` without one. */
+    suspend fun openWifiBle(): WifiInfo = post("v1/wifi/ble")
+
     // -- Lapis-Deck (a Lapis-Zero daemon answers 404 / forwards these nowhere: never call them there)
     suspend fun deckStatus(): DeckStatus = get("v1/deck/status")
 
@@ -352,6 +387,9 @@ class LapisApiClient(
 
         /** Longer than the gate's 600 s approval timeout, so the answer is the gate's, not ours. */
         const val TOOL_READ_TIMEOUT_S = 660L
+
+        /** The daemons answer `wifi/connect` within about 45 s. */
+        const val WIFI_READ_TIMEOUT_S = 75L
 
         /** Percent-encodes one path segment (ids and schedule names may contain spaces). */
         internal fun seg(raw: String): String =

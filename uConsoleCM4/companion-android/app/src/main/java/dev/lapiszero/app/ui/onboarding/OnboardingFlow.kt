@@ -116,9 +116,9 @@ private fun Welcome(canCancel: Boolean, onPick: (Path) -> Unit, onCancel: () -> 
         Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        Text("LAPIS-ZERO", style = LapisType.MonoLarge)
+        Text("LAPIS ZERO", style = LapisType.MonoLarge)
         Text(
-            "Pair this phone with a CardputerZero or a Lapis-Deck to chat with its agent, watch the target screen and approve risky actions.",
+            "Pair this phone with a Lapis Zero device to chat with its agent, watch the target screen and approve risky actions.",
             style = MaterialTheme.typography.bodyLarge,
         )
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -137,14 +137,15 @@ private fun Welcome(canCancel: Boolean, onPick: (Path) -> Unit, onCancel: () -> 
         Spacer(Modifier.height(4.dp))
         EntryCard(
             badge = "bluetooth",
-            title = "Pair a new CardputerZero",
+            title = "Pair a new Lapis Zero",
             text = "No cable, no SD-card editing: enter the PIN on its screen, pick Wi-Fi and join Tailscale.",
+            supported = SUPPORTED_DEVICES,
             onClick = { onPick(Path.BLE) },
         )
         EntryCard(
             badge = "qr code",
             title = "Pair an existing device",
-            text = "Already on Tailscale? On the device choose Menu -> Pair Android App (QR) and scan the code.",
+            text = "Already on Tailscale? Show the pairing QR code on the device and scan it.",
             onClick = { onPick(Path.QR) },
         )
         EntryCard(
@@ -159,12 +160,26 @@ private fun Welcome(canCancel: Boolean, onPick: (Path) -> Unit, onCancel: () -> 
     }
 }
 
+/** The hardware Lapis Zero runs on; each name is the board, then who makes it. */
+internal val SUPPORTED_DEVICES = listOf("CardputerZero (M5Stack)", "uConsole (ClockworkPi, CM4)")
+
 @Composable
-private fun EntryCard(badge: String, title: String, text: String, onClick: () -> Unit) {
+private fun EntryCard(
+    badge: String,
+    title: String,
+    text: String,
+    supported: List<String> = emptyList(),
+    onClick: () -> Unit,
+) {
     LapisCard(Modifier.fillMaxWidth(), borderColor = MaterialTheme.colorScheme.outline, onClick = onClick) {
         LapisBadge(badge, color = lapis.blue)
         Spacer(Modifier.height(6.dp))
         Text(title, style = MaterialTheme.typography.titleMedium)
+        if (supported.isNotEmpty()) {
+            Text("Supported devices", style = LapisType.MonoLabel, color = lapis.muted, modifier = Modifier.padding(top = 4.dp))
+            supported.forEach { Text("• $it", style = MaterialTheme.typography.bodyMedium) }
+            Spacer(Modifier.height(4.dp))
+        }
         Text(text, style = MaterialTheme.typography.bodyMedium, color = lapis.muted)
     }
 }

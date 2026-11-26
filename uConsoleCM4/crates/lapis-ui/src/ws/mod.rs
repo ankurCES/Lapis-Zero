@@ -8,6 +8,7 @@ pub mod net;
 pub mod pty;
 pub mod rf;
 pub mod sys;
+pub mod wifi;
 
 use crate::app::{DeckApp, Nav, AGENT, FLEET, MESH, NET, PTY, RF};
 

@@ -172,6 +172,63 @@ pub fn parse_wireless_rssi(text: &str, iface: &str) -> Option<i32> {
     })
 }
 
+/// `nmcli -t -f NAME,TYPE,ACTIVE connection show` -> the saved Wi-Fi profiles.
+pub fn parse_saved(text: &str) -> Vec<Value> {
+    text.lines()
+        .map(split_terse)
+        .filter(|p| p.len() >= 3 && !p[0].is_empty() && p[1] == "802-11-wireless")
+        .map(|p| json!({"name": p[0], "active": p[2] == "yes"}))
+        .collect()
+}
+
+/// WPA3-only networks need SAE; anything that also speaks WPA2/WPA1 takes a PSK.
+pub fn wants_sae(security: &str) -> bool {
+    security.contains("WPA3") && !security.contains("WPA2") && !security.contains("WPA1")
+}
+
+/// GKeyFile string escaping (NetworkManager keyfiles); control characters are refused.
+fn keyfile_escape(s: &str) -> Option<String> {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            ' ' => out.push_str("\\s"),
+            c if c.is_control() => return None,
+            c => out.push(c),
+        }
+    }
+    Some(out)
+}
+
+/// A NetworkManager keyfile for a WPA network. The PSK lives only in this root-only file,
+/// never on a command line (`/proc/*/cmdline` is readable by the `lapis` user).
+pub fn render_keyfile(ssid: &str, psk: &str, uuid: &str, sae: bool) -> Option<String> {
+    let id = keyfile_escape(ssid)?;
+    let key = keyfile_escape(psk)?;
+    // Bytes as an integer list: unambiguous for any SSID (`;`, `\`, leading spaces).
+    let bytes: String = ssid.bytes().map(|b| format!("{b};")).collect();
+    let mgmt = if sae { "sae" } else { "wpa-psk" };
+    Some(format!(
+        "[connection]\nid={id}\nuuid={uuid}\ntype=wifi\nautoconnect=true\n\n\
+         [wifi]\nmode=infrastructure\nssid={bytes}\n\n\
+         [wifi-security]\nkey-mgmt={mgmt}\npsk={key}\n\n\
+         [ipv4]\nmethod=auto\n\n[ipv6]\nmethod=auto\n"
+    ))
+}
+
+/// A random v4 UUID (from the daemon's token generator: no new dependency).
+fn uuid_v4() -> String {
+    let h = lapis_crypto::token::hash_token(&lapis_crypto::token::mint_token());
+    format!(
+        "{}-{}-4{}-8{}-{}",
+        &h[0..8],
+        &h[8..12],
+        &h[13..16],
+        &h[17..20],
+        &h[20..32]
+    )
+}
+
 pub fn serve_configured(serve_status_json: &str, port: u16) -> bool {
     serve_status_json.contains(&format!("127.0.0.1:{port}"))
 }
@@ -221,6 +278,10 @@ pub trait NetControl: Send + Sync {
     fn wifi_scan(&self) -> Result<Vec<Value>, String>;
     /// `{"state": "connected"|"failed", "local_ip": "..."}`
     fn wifi_connect(&self, ssid: &str, psk: Option<&str>) -> Value;
+    /// Saved Wi-Fi profiles: `[{"name", "active"}]`.
+    fn wifi_saved(&self) -> Vec<Value>;
+    /// Deletes a saved profile; false when there is none by that name.
+    fn wifi_forget(&self, name: &str) -> bool;
     fn tailscale_status(&self) -> NetStatus;
     /// Starts `tailscale up` in the background; it blocks until the node is authorised.
     fn tailscale_up(&self, authkey: Option<&str>);
@@ -230,10 +291,14 @@ pub trait NetControl: Send + Sync {
     fn tailscale_serve(&self) -> bool;
 }
 
+pub const NM_CONNECTIONS: &str = "/etc/NetworkManager/system-connections";
+
 pub struct LinuxNet {
     runner: Arc<dyn Runner>,
     iface: String,
     up_result: Arc<Mutex<Option<(i32, String)>>>,
+    /// Where Wi-Fi keyfiles are written (tests point it at a temp dir).
+    pub keyfile_dir: std::path::PathBuf,
 }
 
 impl LinuxNet {
@@ -242,7 +307,81 @@ impl LinuxNet {
             runner,
             iface: iface.to_owned(),
             up_result: Arc::new(Mutex::new(None)),
+            keyfile_dir: NM_CONNECTIONS.into(),
         }
+    }
+
+    fn wait_ip(&self, rc: i32) -> String {
+        let mut ip = String::new();
+        for _ in 0..10 {
+            let (_, dev) = self.runner.run(
+                &[
+                    "nmcli",
+                    "-t",
+                    "-f",
+                    "GENERAL.CONNECTION,IP4.ADDRESS",
+                    "device",
+                    "show",
+                    &self.iface,
+                ],
+                Duration::from_secs(5),
+            );
+            ip = parse_nmcli_device(&dev).1;
+            if rc != 0 || !ip.is_empty() {
+                break;
+            }
+            std::thread::sleep(Duration::from_secs(1));
+        }
+        ip
+    }
+
+    /// The scan's SECURITY column for `ssid` ("" when it is not in range).
+    fn security_of(&self, ssid: &str) -> String {
+        let (_, out) = self.runner.run(
+            &["nmcli", "-t", "-f", "SSID,SECURITY", "dev", "wifi", "list"],
+            Duration::from_secs(20),
+        );
+        out.lines()
+            .map(split_terse)
+            .find(|p| p.len() >= 2 && p[0] == ssid)
+            .map(|p| p[1].clone())
+            .unwrap_or_default()
+    }
+
+    /// Secured network: keyfile + `connection up`. Returns nmcli's exit code.
+    fn connect_with_keyfile(&self, ssid: &str, psk: &str) -> i32 {
+        let uuid = uuid_v4();
+        let sae = wants_sae(&self.security_of(ssid));
+        let Some(text) = render_keyfile(ssid, psk, &uuid, sae) else {
+            return 2;
+        };
+        let hex: String = ssid.bytes().map(|b| format!("{b:02x}")).collect();
+        let path = self.keyfile_dir.join(format!("lapis-{hex}.nmconnection"));
+        if let Err(e) = crate::config::atomic_write(&path, text.as_bytes(), 0o600) {
+            tracing::warn!(error = %e, "cannot write the Wi-Fi profile");
+            return 1;
+        }
+        let path_s = path.to_string_lossy().into_owned();
+        let t = Duration::from_secs(10);
+        let (mut rc, _) = self
+            .runner
+            .run(&["nmcli", "connection", "load", &path_s], t);
+        if rc == 0 {
+            rc = self
+                .runner
+                .run(
+                    &["nmcli", "--wait", "30", "connection", "up", "uuid", &uuid],
+                    Duration::from_secs(40),
+                )
+                .0;
+        }
+        if rc != 0 {
+            // Connect saves only on success: no profile left with a wrong password.
+            self.runner
+                .run(&["nmcli", "connection", "delete", "uuid", &uuid], t);
+            let _ = std::fs::remove_file(&path);
+        }
+        rc
     }
 
     fn wifi_ready(&self, tries: u32) -> bool {
@@ -304,36 +443,49 @@ impl NetControl for LinuxNet {
             &["nmcli", "connection", "delete", "id", ssid],
             Duration::from_secs(10),
         );
-        let mut argv = vec!["nmcli", "--wait", "30", "dev", "wifi", "connect", ssid];
-        if let Some(psk) = psk {
-            argv.extend(["password", psk]);
-        }
-        let (rc, _) = self.runner.run(&argv, Duration::from_secs(40));
-        let mut ip = String::new();
-        for _ in 0..10 {
-            let (_, dev) = self.runner.run(
-                &[
-                    "nmcli",
-                    "-t",
-                    "-f",
-                    "GENERAL.CONNECTION,IP4.ADDRESS",
-                    "device",
-                    "show",
-                    &self.iface,
-                ],
-                Duration::from_secs(5),
-            );
-            ip = parse_nmcli_device(&dev).1;
-            if rc != 0 || !ip.is_empty() {
-                break;
+        let rc = match psk {
+            Some(psk) => self.connect_with_keyfile(ssid, psk),
+            None => {
+                self.runner
+                    .run(
+                        &["nmcli", "--wait", "30", "dev", "wifi", "connect", ssid],
+                        Duration::from_secs(40),
+                    )
+                    .0
             }
-            std::thread::sleep(Duration::from_secs(1));
-        }
+        };
+        let ip = self.wait_ip(rc);
         if rc != 0 || ip.is_empty() {
             tracing::warn!(rc, "wifi connect failed");
             return json!({"state": "failed", "local_ip": ""});
         }
         json!({"state": "connected", "local_ip": ip})
+    }
+
+    fn wifi_saved(&self) -> Vec<Value> {
+        let (_, out) = self.runner.run(
+            &[
+                "nmcli",
+                "-t",
+                "-f",
+                "NAME,TYPE,ACTIVE",
+                "connection",
+                "show",
+            ],
+            Duration::from_secs(10),
+        );
+        parse_saved(&out)
+    }
+
+    fn wifi_forget(&self, name: &str) -> bool {
+        if !self.wifi_saved().iter().any(|s| s["name"] == name) {
+            return false;
+        }
+        let (rc, _) = self.runner.run(
+            &["nmcli", "connection", "delete", "id", name],
+            Duration::from_secs(10),
+        );
+        rc == 0
     }
 
     fn tailscale_status(&self) -> NetStatus {
@@ -409,6 +561,7 @@ impl NetControl for LinuxNet {
 /// Deterministic provisioning network for tests and the host preview.
 pub struct MockNet {
     pub status: Mutex<NetStatus>,
+    pub saved: Mutex<Vec<String>>,
     pub up_calls: Mutex<Vec<Option<String>>>,
     pub serve_ok: bool,
 }
@@ -417,9 +570,12 @@ impl Default for MockNet {
     fn default() -> Self {
         MockNet {
             status: Mutex::new(NetStatus {
+                wifi_ssid: "lapis-lab".into(),
+                wifi_ip: "192.168.1.42".into(),
                 tailscale_state: "needs_login".into(),
                 ..Default::default()
             }),
+            saved: Mutex::new(vec!["lapis-lab".into()]),
             up_calls: Mutex::new(Vec::new()),
             serve_ok: true,
         }
@@ -442,7 +598,39 @@ impl NetControl for MockNet {
             s.wifi_ssid = ssid.to_owned();
             s.wifi_ip = "192.168.1.42".into();
         }
+        if let Ok(mut saved) = self.saved.lock() {
+            if !saved.iter().any(|s| s == ssid) {
+                saved.push(ssid.to_owned());
+            }
+        }
         json!({"state": "connected", "local_ip": "192.168.1.42"})
+    }
+
+    fn wifi_saved(&self) -> Vec<Value> {
+        let active = self.tailscale_status().wifi_ssid;
+        self.saved
+            .lock()
+            .map(|s| {
+                s.iter()
+                    .map(|n| json!({"name": n, "active": *n == active}))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn wifi_forget(&self, name: &str) -> bool {
+        let Ok(mut saved) = self.saved.lock() else {
+            return false;
+        };
+        let before = saved.len();
+        saved.retain(|s| s != name);
+        if let Ok(mut st) = self.status.lock() {
+            if st.wifi_ssid == name {
+                st.wifi_ssid.clear();
+                st.wifi_ip.clear();
+            }
+        }
+        before != saved.len()
     }
 
     fn tailscale_status(&self) -> NetStatus {
@@ -520,5 +708,105 @@ mod tests {
             8421
         ));
         assert!(!serve_configured("{}", 8421));
+        assert_eq!(
+            parse_saved(
+                "home:802-11-wireless:yes\nWired:802-3-ethernet:no\nmy\\:net:802-11-wireless:no\n"
+            ),
+            vec![
+                json!({"name":"home","active":true}),
+                json!({"name":"my:net","active":false})
+            ]
+        );
+        assert!(wants_sae("WPA3") && !wants_sae("WPA2 WPA3") && !wants_sae("--"));
+    }
+
+    #[test]
+    fn keyfile() {
+        let k = render_keyfile(" a;b\\", "p w\\x", "u-1", false).unwrap();
+        assert!(k.contains("\nid=\\sa;b\\\\\n"), "{k}");
+        assert!(k.contains("\nssid=32;97;59;98;92;\n"), "{k}");
+        assert!(k.contains("\nkey-mgmt=wpa-psk\npsk=p\\sw\\\\x\n"), "{k}");
+        assert!(render_keyfile("home", "pw", "u", true)
+            .unwrap()
+            .contains("key-mgmt=sae"));
+        assert!(render_keyfile("home", "bad\npw", "u", false).is_none());
+        let u = uuid_v4();
+        assert_eq!((u.len(), &u[14..15], &u[19..20]), (36, "4", "8"));
+    }
+
+    struct Nm {
+        calls: Mutex<Vec<String>>,
+        up_rc: i32,
+    }
+
+    impl Runner for Nm {
+        fn run(&self, argv: &[&str], _t: Duration) -> (i32, String) {
+            if let Ok(mut c) = self.calls.lock() {
+                c.push(argv.join(" "));
+            }
+            match argv {
+                ["nmcli", "-t", "-f", "SSID,SECURITY", ..] => (0, "home:WPA3\n".into()),
+                ["nmcli", "-t", "-f", "GENERAL.CONNECTION,IP4.ADDRESS", ..] => (
+                    0,
+                    "GENERAL.CONNECTION:home\nIP4.ADDRESS[1]:10.0.0.7/24\n".into(),
+                ),
+                ["nmcli", "--wait", "30", "connection", "up", ..] => (self.up_rc, String::new()),
+                ["nmcli", "-t", "-f", "NAME,TYPE,ACTIVE", ..] => {
+                    (0, "home:802-11-wireless:yes\n".into())
+                }
+                _ => (0, String::new()),
+            }
+        }
+    }
+
+    fn linux_net(up_rc: i32) -> (Arc<Nm>, LinuxNet, tempfile::TempDir) {
+        let nm = Arc::new(Nm {
+            calls: Mutex::new(Vec::new()),
+            up_rc,
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let mut net = LinuxNet::new(nm.clone(), "wlan0");
+        net.keyfile_dir = dir.path().into();
+        (nm, net, dir)
+    }
+
+    /// The PSK goes to a 0600 keyfile, never into any argv; a failed join leaves nothing saved.
+    #[test]
+    fn psk_never_on_a_command_line() {
+        let psk = "correct horse battery";
+        let (nm, net, dir) = linux_net(0);
+        assert_eq!(
+            net.wifi_connect("home", Some(psk)),
+            json!({"state": "connected", "local_ip": "10.0.0.7"})
+        );
+        let calls = nm.calls.lock().unwrap().clone();
+        assert!(calls.iter().all(|c| !c.contains("horse")), "{calls:?}");
+        assert!(calls
+            .iter()
+            .any(|c| c.starts_with("nmcli connection load ")));
+        let file = dir.path().join("lapis-686f6d65.nmconnection");
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert!(text.contains("key-mgmt=sae") && text.contains("psk=correct\\shorse"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+
+        let (nm, net, dir) = linux_net(4);
+        assert_eq!(net.wifi_connect("home", Some(psk))["state"], "failed");
+        assert!(nm
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|c| c.starts_with("nmcli connection delete uuid ")));
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+
+        assert!(net.wifi_forget("home"));
+        assert!(!net.wifi_forget("elsewhere"));
     }
 }

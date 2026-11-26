@@ -176,7 +176,7 @@ private fun IntroStep(container: AppContainer, onReady: () -> Unit) {
     }
 
     Text(
-        "On the CardputerZero choose Menu -> Pair Android App; on a Lapis-Deck open the pairing screen in [7] SYSTEM " +
+        "On a CardputerZero choose Menu -> Pair Android App; on a uConsole open the pairing screen in [7] SYSTEM " +
             "(a freshly flashed device starts in this mode). It shows a 6-digit PIN and stays discoverable for five minutes.",
         style = MaterialTheme.typography.bodyMedium,
     )
@@ -185,9 +185,9 @@ private fun IntroStep(container: AppContainer, onReady: () -> Unit) {
         !granted -> {
             Text(
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                    "Lapis needs the Nearby devices permission to find and connect to the CardputerZero or Lapis-Deck."
+                    "Lapis Zero needs the Nearby devices permission to find and connect to the device."
                 } else {
-                    "On this Android version, Bluetooth scanning requires the Location permission. Lapis does not use your location."
+                    "On this Android version, Bluetooth scanning requires the Location permission. Lapis Zero does not use your location."
                 },
                 style = MaterialTheme.typography.bodyMedium,
             )

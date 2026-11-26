@@ -30,6 +30,11 @@ pub enum Tag {
     ConfigSaved,
     Secrets,
     HostsSaved,
+    Wifi,
+    WifiScan,
+    WifiConnect(String),
+    WifiForget(String),
+    WifiBle,
     Ignore,
 }
 

@@ -498,3 +498,86 @@ fn add_host_from_the_tailnet() {
         "the deck is built in, never stored"
     );
 }
+
+#[test]
+fn wifi_join_forget_and_phone_window_from_the_keyboard() {
+    let ctx = egui::Context::default();
+    let mut app = seeded();
+    http(
+        &app.client,
+        Tag::Wifi,
+        json!({"ssid": "lapis-lab", "ip": "192.168.1.42", "rssi": -55, "saved": [{"name": "lapis-lab", "active": true}],
+               "ble": {"open": false, "expires_at": 0}}),
+    );
+    frame(&ctx, &mut app, vec![], &[]);
+    app.ws = 3;
+    app.section[3] = 0;
+    frame(&ctx, &mut app, vec![], &[]);
+    assert!(
+        sent(&app).iter().any(|s| s["path"] == "/v1/wifi/scan"),
+        "opening the pane scans once"
+    );
+    http(
+        &app.client,
+        Tag::WifiScan,
+        json!({"networks": [{"ssid": "home", "rssi": -50, "secured": true}, {"ssid": "cafe", "rssi": -70, "secured": false}]}),
+    );
+    let down = |ctx: &egui::Context, app: &mut DeckApp| {
+        frame(ctx, app, vec![key(Key::ArrowDown, Modifiers::NONE)], &[])
+    };
+    let a = |ctx: &egui::Context, app: &mut DeckApp| {
+        frame(ctx, app, vec![], &[pad(Pad::A, true)]);
+        frame(ctx, app, vec![], &[pad(Pad::A, false)]);
+    };
+    frame(&ctx, &mut app, vec![], &[]);
+    a(&ctx, &mut app); // into the content: rows are SCAN, home, cafe, saved lapis-lab, phone
+    assert!(app.content[3]);
+    down(&ctx, &mut app);
+    a(&ctx, &mut app);
+    assert!(
+        matches!(&app.net.wifi.mode, lapis_ui::ws::wifi::Mode::Join { ssid, secured: true } if ssid == "home")
+    );
+    // B outside the field goes back to the list, not out of NETOPS.
+    frame(&ctx, &mut app, vec![], &[pad(Pad::B, true)]);
+    frame(&ctx, &mut app, vec![], &[pad(Pad::B, false)]);
+    assert_eq!(app.net.wifi.mode, lapis_ui::ws::wifi::Mode::List);
+    assert!(app.content[3]);
+    a(&ctx, &mut app);
+    a(&ctx, &mut app); // edit PASSWORD
+    typed(&ctx, &mut app, "hunter2-pass");
+    frame(&ctx, &mut app, vec![key(Key::Enter, Modifiers::NONE)], &[]);
+    frame(&ctx, &mut app, vec![], &[]);
+    a(&ctx, &mut app); // CONNECT
+    let join = sent(&app)
+        .into_iter()
+        .find(|s| s["path"] == "/v1/wifi/connect")
+        .expect("POST /v1/wifi/connect");
+    assert_eq!(join["body"], json!({"ssid": "home", "psk": "hunter2-pass"}));
+    assert!(app.net.wifi.psk.is_empty(), "the password is not kept");
+    assert_eq!(app.net.wifi.mode, lapis_ui::ws::wifi::Mode::List);
+    http(
+        &app.client,
+        Tag::WifiConnect("home".into()),
+        json!({"state": "connected", "local_ip": "10.0.0.7"}),
+    );
+    frame(&ctx, &mut app, vec![], &[]);
+    assert!(app.m.wifi_busy.is_empty());
+
+    // Saved network: A asks, FORGET confirms.
+    down(&ctx, &mut app);
+    down(&ctx, &mut app);
+    a(&ctx, &mut app);
+    assert_eq!(
+        app.net.wifi.mode,
+        lapis_ui::ws::wifi::Mode::Forget("lapis-lab".into())
+    );
+    a(&ctx, &mut app);
+    assert!(sent(&app)
+        .iter()
+        .any(|s| s["path"] == "/v1/wifi/forget" && s["body"]["name"] == "lapis-lab"));
+
+    // Last row: open the Bluetooth window for paired phones.
+    down(&ctx, &mut app);
+    a(&ctx, &mut app);
+    assert!(sent(&app).iter().any(|s| s["path"] == "/v1/wifi/ble"));
+}

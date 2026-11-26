@@ -78,6 +78,7 @@ import dev.lapiszero.app.data.remote.DeviceState
 import dev.lapiszero.app.domain.ConnectionState
 import dev.lapiszero.app.domain.DeckGate
 import dev.lapiszero.app.domain.DevicesState
+import dev.lapiszero.app.domain.HostSync
 import dev.lapiszero.app.domain.LapisSession
 import dev.lapiszero.app.domain.Notice
 import dev.lapiszero.app.domain.PairedDevice
@@ -98,6 +99,7 @@ import dev.lapiszero.app.ui.config.ConfigRoutes
 import dev.lapiszero.app.ui.config.configGraph
 import dev.lapiszero.app.ui.deck.DeckScreen
 import dev.lapiszero.app.ui.device.DeviceScreen
+import dev.lapiszero.app.ui.device.WifiScreen
 import dev.lapiszero.app.ui.kvm.KvmScreen
 import dev.lapiszero.app.ui.onboarding.OnboardingFlow
 import kotlinx.coroutines.launch
@@ -107,6 +109,9 @@ object Routes {
     const val CHAT = "chat/{chatId}"
     const val KVM = "kvm"
     const val DEVICE = "device"
+
+    /** "Change Wi-Fi" of the active device, opened from the Device tab. */
+    const val WIFI = "device/wifi"
 
     /** Lapis-Deck only: rails, GPS, mesh, SDR, NetOps, live feed, audit. */
     const val DECK = "deck"
@@ -247,7 +252,8 @@ private fun MainShell(
                 NavigationBar {
                     tabs.forEach { tab ->
                         val selected = route == tab.route ||
-                            (tab.route == Routes.CONFIG && route.startsWith(ConfigRoutes.PREFIX))
+                            (tab.route == Routes.CONFIG && route.startsWith(ConfigRoutes.PREFIX)) ||
+                            (tab.route == Routes.DEVICE && route == Routes.WIFI)
                         NavigationBarItem(
                             selected = selected,
                             onClick = {
@@ -277,7 +283,7 @@ private fun MainShell(
         // Consumed, so imePadding / navigationBarsPadding further down only add what is left.
         Column(Modifier.padding(padding).consumeWindowInsets(padding).fillMaxSize()) {
             ConnectionBanner(connection, state, onRetry = { session.repo.reconnectNow() }, onRepair = onPairAnother)
-            ShellNavHost(nav, session, snackbar, approvalsVm, isDeck, Modifier.weight(1f))
+            ShellNavHost(container, nav, session, snackbar, approvalsVm, isDeck, Modifier.weight(1f))
         }
     }
 
@@ -355,6 +361,7 @@ private fun NotificationPermission(container: AppContainer) {
 
 @Composable
 private fun ShellNavHost(
+    container: AppContainer,
     nav: NavHostController,
     session: LapisSession,
     snackbar: SnackbarHostState,
@@ -362,6 +369,8 @@ private fun ShellNavHost(
     isDeck: Boolean,
     modifier: Modifier,
 ) {
+    // Hosts on every paired device, each through its own endpoint and token.
+    val hostSync = remember(session) { HostSync(session.device.id, container.devices, container.hostBook) }
     NavHost(nav, startDestination = Routes.CHATS, modifier = modifier) {
         composable(Routes.CHATS) {
             ChatListScreen(session, snackbar, onOpenChat = { nav.navigate(Routes.chat(it)) })
@@ -371,7 +380,10 @@ private fun ShellNavHost(
             SessionsScreen(session, chatId, snackbar, approvals, onAllClosed = { nav.popBackStack() })
         }
         composable(Routes.KVM) { KvmScreen(session, snackbar) }
-        composable(Routes.DEVICE) { DeviceScreen(session, snackbar, isDeck) }
+        composable(Routes.DEVICE) {
+            DeviceScreen(session, snackbar, isDeck, onChangeWifi = { nav.navigate(Routes.WIFI) { launchSingleTop = true } })
+        }
+        composable(Routes.WIFI) { WifiScreen(container, session) }
         composable(Routes.DECK) {
             if (isDeck) {
                 DeckScreen(session, snackbar)
@@ -382,7 +394,7 @@ private fun ShellNavHost(
                 }
             }
         }
-        configGraph(nav, session, snackbar, onOpenChat = { nav.navigate(Routes.chat(it)) })
+        configGraph(nav, session, snackbar, onOpenChat = { nav.navigate(Routes.chat(it)) }, sync = hostSync)
     }
 }
 
@@ -407,6 +419,7 @@ private fun shellTabs(isDeck: Boolean): List<Tab> = shellTabRoutes(isDeck).map {
 
 private fun titleFor(route: String): String = when {
     route.startsWith("chat/") -> "Sessions"
+    route == Routes.WIFI -> "Change Wi-Fi"
     else -> ConfigRoutes.title(route)
 }
 

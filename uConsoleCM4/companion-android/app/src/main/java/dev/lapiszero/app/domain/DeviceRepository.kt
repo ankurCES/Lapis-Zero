@@ -33,6 +33,12 @@ data class PairedDevice(
      * every `state_sync`); "" for a pairing stored by an app version from before the Deck.
      */
     val kind: String = "",
+    /**
+     * The name the device advertises over Bluetooth (`LapisZero-XXXX` / `LapisDeck-XXXX`) when this
+     * phone paired with it over BLE or changed its Wi-Fi that way; "" when unknown (QR or dev
+     * pairing, or a vault from before this field). Used to preselect it in a Bluetooth scan.
+     */
+    @SerialName("ble_name") val bleName: String = "",
 ) {
     val isProvisioned: Boolean get() = host.isNotEmpty()
     val isDeck: Boolean get() = DeviceKind.isDeck(kind)
@@ -96,6 +102,7 @@ class DeviceRepository(private val store: SecureStore) {
         remoteId: String,
         nowSec: Long = System.currentTimeMillis() / 1000,
         kind: String = "",
+        bleName: String = "",
     ): PairedDevice {
         require(token.isNotEmpty()) { "token must not be empty" }
         val device = PairedDevice(
@@ -107,6 +114,7 @@ class DeviceRepository(private val store: SecureStore) {
             remoteId = remoteId,
             addedAt = nowSec,
             kind = kind,
+            bleName = bleName,
         )
         update { s ->
             val others = s.devices.filterNot {
@@ -150,6 +158,13 @@ class DeviceRepository(private val store: SecureStore) {
     fun setKind(id: String, kind: String) {
         if (kind.isEmpty() || find(id)?.kind == kind || find(id) == null) return
         update { s -> s.copy(devices = s.devices.map { if (it.id == id) it.copy(kind = kind) else it }) }
+    }
+
+    /** The advertised Bluetooth name, learned from a session that proved it is this device. */
+    fun setBleName(id: String, bleName: String) {
+        val current = find(id) ?: return
+        if (bleName.isEmpty() || current.bleName == bleName) return
+        update { s -> s.copy(devices = s.devices.map { if (it.id == id) it.copy(bleName = bleName) else it }) }
     }
 
     /** The one-time timezone hand-over after pairing is done for this device. */

@@ -960,3 +960,32 @@ and the boot partition file by file (445 files each, macOS's own folders left ou
 boot partition is readable only by root, so it is mounted with `diskutil mount readOnly`, not
 `mount -t msdos`. On the device after re-pairing (2026-11-25): Claude Code and Gemini CLI chats on
 cut-mac-002 both answer cleanly, with no `/login` error and no terminal warnings.
+
+## Wi-Fi without re-pairing (2026-11-26, bead `ankur-3hf.15`)
+
+- **BLE paired-phone mode** (`BLE_PROVISIONING_PROTOCOL.md` 4.2, shared with Lapis-Deck): a phone
+  paired earlier proves its api_token (`"tok:" + sha256 hex` in the PIN's place) and may then only
+  `wifi_scan`, `wifi_connect`, `finish_provisioning`. No new token, no pairing screen; wrong or
+  revoked tokens count as failed attempts (3-strike lockout). Frozen `paired_vector` added to
+  `tests/vectors/ble_crypto_vectors.json` (old sections unchanged; generator updated).
+- **Phone Wi-Fi window**: `lapis-ble-prov` in a paired-only mode (the daemon writes `wifi` / `pin` to
+  `ble-prov.mode` next to its socket before starting the unit). Opens once per offline episode
+  (a paired phone, Wi-Fi unconnected for 30 s) or with `POST /v1/wifi/ble`; a PIN window replaces it
+  and accepts paired phones too.
+- **REST** `GET /v1/wifi`, `GET /v1/wifi/scan`, `POST /v1/wifi/connect`, `POST /v1/wifi/forget`,
+  `POST /v1/wifi/ble` (`api/routes_wifi.py`; `ANDROID_COMPANION_SPEC.md` 5.7).
+- **The password never on a command line**: secured networks get a root 0600 NetworkManager
+  keyfile + `nmcli connection load` / `up uuid` (deleted on failure) instead of `nmcli … password`.
+- Checks: `cd daemon && uv run pytest` 301 passed, 1 xfailed (was 285); `ruff check` and
+  `ruff format --check` clean; `make test lint fmt-check` exit 0. Note: the suite needs
+  `uv sync --all-extras` (asyncssh, bluez-peripheral …) after the uv cache was cleared.
+- Needs a real CardputerZero: NetworkManager 1.52 taking the keyfile (`connection load`, `up uuid`,
+  `sae` on a WPA3-only AP, cleanup after a wrong password); the paired-only window with a real
+  phone (screen untouched, 300 s / 600 s, auto-open after pulling the AP); `/proc/net/wireless` RSSI.
+- `android/` (the older copy of the app): launcher name "Lapis Zero", the new adaptive icon, and the
+  pairing card "Pair a new Lapis Zero" with the supported devices, same as `uConsoleCM4/companion-android`
+  (which has the Wi-Fi change and KVM-hosts features and is the app to install: same applicationId).
+  `./gradlew test assembleDebug lint`: 261 tests, 253 passed, 0 failed, 8 skipped; lint no errors.
+- Image rebuilt with this daemon (`make -C os deploy`, 2026-11-26, exit 0): `lapis-zero-arm64.img.xz`
+  639,160,516 bytes, SHA-256 `d8678faaf825dda1866fe88cb83876103fa1c810bf0b02bd75ce85ad89ca7354`
+  (raw 5,368,709,120, `2a1df3e3…79ef`). The 0.3.3 image moved to `os/deploy/previous/`.

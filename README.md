@@ -317,6 +317,27 @@ subsystems, and hosts a policy-gated agent that operates the deck's own radios a
 machines on your Tailscale tailnet (VNC/SSH, or the agent CLIs installed on them). The Lapis-Zero
 Android companion app pairs with it and controls it, unchanged.
 
+<table>
+  <tr>
+    <td width="50%"><img src="uConsoleCM4/screenshots/hud/01-agent.png" alt="AGENT workspace: start a chat on the deck or a tailnet host"></td>
+    <td width="50%"><img src="uConsoleCM4/screenshots/hud/02-rf-waterfall.png" alt="RF workspace: live spectrum and waterfall"></td>
+  </tr>
+  <tr>
+    <td align="center">Command center: chats on the deck or any tailnet machine</td>
+    <td align="center">RF: spectrum and waterfall</td>
+  </tr>
+  <tr>
+    <td><img src="uConsoleCM4/screenshots/hud/03-mesh.png" alt="MESH workspace: Meshtastic nodes with SNR, RSSI and distance"></td>
+    <td><img src="uConsoleCM4/screenshots/hud/04-net-wifi.png" alt="NET workspace: the deck's Wi-Fi, scan, join and forget"></td>
+  </tr>
+  <tr>
+    <td align="center">Meshtastic nodes</td>
+    <td align="center">Wi-Fi: scan, join, forget, or let the phone set it</td>
+  </tr>
+</table>
+
+The HUD shown with dummy data from the host preview (`uConsoleCM4/scripts/preview.sh`).
+
 It lives in [`uConsoleCM4/`](uConsoleCM4/) — Rust crates (`lapis-crypto`, `lapis-daemon`, `lapis-sdr`,
 `lapis-ui`), a Python agent stack, the companion app, and a pi-gen image builder. See
 [`uConsoleCM4/README.md`](uConsoleCM4/README.md) for the layout, build and flash steps.

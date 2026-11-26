@@ -1,5 +1,7 @@
 //! lapis-ble-v1 provisioning session: handshake, PIN proof, lockout, commands. Ported from
 //! Lapis-Zero's `ble_prov/session.py` (hardware-tested) so the same Android app pairs with it.
+//! Paired-phone mode (protocol 4.2): a phone paired earlier proves its api_token instead of a
+//! PIN (`"tok:" + sha256 hex` takes the PIN's place in the salt) and may only change Wi-Fi.
 //! Transport-independent: the GATT server feeds bytes in and sends [`Outbound`] frames out;
 //! the tests drive it with a fake phone.
 
@@ -16,6 +18,7 @@ use tokio::sync::{mpsc, Mutex};
 pub const MAX_FAILURES: u32 = 3;
 pub const LOCKOUT_COOLDOWN: Duration = Duration::from_secs(5);
 pub const TAILSCALE_TIMEOUT: Duration = Duration::from_secs(300);
+pub const NOT_FOR_PAIRED: &str = "not allowed for a paired phone";
 pub const HTTPS_NOT_ENABLED: &str = "Joined the tailnet, but HTTPS is not enabled for it. In the Tailscale admin console (DNS page) enable MagicDNS and HTTPS Certificates, then retry.";
 
 pub type BoxFut<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -30,6 +33,8 @@ pub trait Backend: Send + Sync {
     fn tailscale_up_error(&self) -> Option<String>;
     fn tailscale_serve(&self) -> BoxFut<'_, bool>;
     fn push_secrets(&self, values: Map<String, Value>) -> BoxFut<'_, Result<Vec<String>, String>>;
+    /// `(device id, token hash hex)` of every phone paired before (not revoked).
+    fn paired_secrets(&self) -> Vec<(String, String)>;
     /// Pairing view updates: waiting | connected | verified | wifi | tailscale | locked | done.
     fn status(&self, status: &str, pin: &str);
 }
@@ -43,6 +48,12 @@ pub enum Outbound {
 struct Inner {
     eph: Ephemeral,
     pin: String,
+    /// False in the phone Wi-Fi window: no PIN is on screen, so none is accepted.
+    allow_pin: bool,
+    /// Key sets derived at the handshake; the first envelope that opens picks the mode.
+    candidates: Vec<(Option<String>, ble::SessionKeys)>,
+    /// The paired phone's device id once a token key set opened the first envelope.
+    paired: Option<String>,
     chan: Option<DeviceChannel>,
     rx: Reassembler,
     tx_msg: u8,
@@ -59,9 +70,16 @@ impl Inner {
         self.eph = Ephemeral::generate();
         self.pin = lapis_crypto::token::generate_pin();
         self.chan = None;
+        self.candidates.clear();
+        self.paired = None;
         self.verified = false;
         self.failures = 0;
         self.rx.reset();
+    }
+
+    /// Pairing-screen statuses belong to PIN sessions only.
+    fn shows_status(&self) -> bool {
+        self.allow_pin && self.paired.is_none()
     }
 
     fn locked(&self) -> bool {
@@ -86,9 +104,28 @@ fn secret_name_re() -> Option<&'static Regex> {
 
 impl Session {
     pub fn new(backend: Arc<dyn Backend>, out: mpsc::UnboundedSender<Outbound>) -> Arc<Self> {
+        Self::build(backend, out, true)
+    }
+
+    /// The phone Wi-Fi window: paired phones only, no PIN pairing.
+    pub fn paired_only(
+        backend: Arc<dyn Backend>,
+        out: mpsc::UnboundedSender<Outbound>,
+    ) -> Arc<Self> {
+        Self::build(backend, out, false)
+    }
+
+    fn build(
+        backend: Arc<dyn Backend>,
+        out: mpsc::UnboundedSender<Outbound>,
+        allow_pin: bool,
+    ) -> Arc<Self> {
         let mut inner = Inner {
             eph: Ephemeral::generate(),
             pin: String::new(),
+            allow_pin,
+            candidates: Vec::new(),
+            paired: None,
             chan: None,
             rx: Reassembler::default(),
             tx_msg: 0,
@@ -133,8 +170,10 @@ impl Session {
         self.inner.lock().await.eph.hello.encode().to_vec()
     }
 
-    /// ClientHello (`HANDSHAKE` write): derive the keys bound to the PIN on screen.
+    /// ClientHello (`HANDSHAKE` write): derive the keys bound to the PIN on screen and to
+    /// each paired phone's token.
     pub async fn handshake_write(&self, data: &[u8]) -> Result<(), String> {
+        let paired = self.backend.paired_secrets();
         let mut inner = self.inner.lock().await;
         if inner.locked() {
             return Err("locked out; retry shortly".into());
@@ -144,14 +183,26 @@ impl Session {
             .eph
             .shared(&client.public)
             .map_err(|e| e.to_string())?;
-        let keys = ble::derive(&shared, &client, &inner.eph.hello, &inner.pin);
-        inner.chan = Some(DeviceChannel::new(keys));
+        let device = inner.eph.hello;
+        let mut candidates = Vec::new();
+        if inner.allow_pin {
+            candidates.push((None, ble::derive(&shared, &client, &device, &inner.pin)));
+        }
+        for (id, hash) in paired {
+            let keys = ble::derive(&shared, &client, &device, &format!("tok:{hash}"));
+            candidates.push((Some(id), keys));
+        }
+        inner.candidates = candidates;
+        inner.chan = None;
+        inner.paired = None;
         inner.tx_msg = 0;
         inner.verified = false;
         inner.rx.reset();
-        let pin = inner.pin.clone();
+        let (pin, show) = (inner.pin.clone(), inner.allow_pin);
         drop(inner);
-        self.backend.status("connected", &pin);
+        if show {
+            self.backend.status("connected", &pin);
+        }
         Ok(())
     }
 
@@ -174,25 +225,56 @@ impl Session {
             let Some((flags, payload)) = complete else {
                 return;
             };
-            if flags & FLAG_ENCRYPTED == 0 || inner.chan.is_none() {
+            if flags & FLAG_ENCRYPTED == 0 || (inner.chan.is_none() && inner.candidates.is_empty())
+            {
                 let _ = self
                     .out
                     .send(Outbound::Frame(framing::reset_frame(0).to_vec()));
                 return;
             }
-            let opened = inner.chan.as_mut().map(|c| c.open(&payload));
-            match opened {
-                Some(Ok(pt)) => match serde_json::from_slice::<Value>(&pt) {
+            if inner.chan.is_none() {
+                // First envelope: whichever key set opens it decides PIN vs paired phone.
+                let mut chosen = None;
+                for (id, keys) in &inner.candidates {
+                    let mut chan = DeviceChannel::new(keys.clone());
+                    if let Ok(pt) = chan.open(&payload) {
+                        chosen = Some((id.clone(), chan, pt));
+                        break;
+                    }
+                }
+                let Some((id, chan, pt)) = chosen else {
+                    drop(inner);
+                    return self.failure().await; // wrong PIN or unknown phone
+                };
+                let back_to_waiting = id.is_some() && inner.allow_pin;
+                inner.paired = id;
+                inner.chan = Some(chan);
+                inner.candidates.clear();
+                if back_to_waiting {
+                    // Not the new phone the PIN screen waits for: show it as it was.
+                    self.backend.status("waiting", &inner.pin);
+                }
+                match serde_json::from_slice::<Value>(&pt) {
                     Ok(Value::Object(cmd)) => cmd,
                     _ => {
                         drop(inner);
                         return self.failure().await;
                     }
-                },
-                // A wrong PIN derives the wrong key, so it shows up right here.
-                _ => {
-                    drop(inner);
-                    return self.failure().await;
+                }
+            } else {
+                let opened = inner.chan.as_mut().map(|c| c.open(&payload));
+                match opened {
+                    Some(Ok(pt)) => match serde_json::from_slice::<Value>(&pt) {
+                        Ok(Value::Object(cmd)) => cmd,
+                        _ => {
+                            drop(inner);
+                            return self.failure().await;
+                        }
+                    },
+                    _ => {
+                        drop(inner);
+                        return self.failure().await;
+                    }
                 }
             }
         };
@@ -210,9 +292,11 @@ impl Session {
         }
         inner.locked_until = Some(Instant::now() + LOCKOUT_COOLDOWN);
         inner.rotate();
-        let pin = inner.pin.clone();
+        let (pin, show) = (inner.pin.clone(), inner.allow_pin);
         drop(inner);
-        self.backend.status("locked", &pin);
+        if show {
+            self.backend.status("locked", &pin);
+        }
         let _ = self.out.send(Outbound::Disconnect);
     }
 
@@ -253,13 +337,33 @@ impl Session {
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_owned();
-        if cmd == "pin_verify" {
-            return self.pin_verify(&command).await;
+        let (paired, show) = {
+            let inner = self.inner.lock().await;
+            (inner.paired.is_some(), inner.shows_status())
+        };
+        match (cmd.as_str(), paired) {
+            ("pin_verify", false) => return self.pin_verify(&command).await,
+            ("token_verify", true) => return self.token_verify(&command).await,
+            ("pin_verify" | "token_verify", _) => return self.failure().await,
+            _ => {}
         }
         if !self.is_verified().await {
             return self.failure().await;
         }
+        if paired
+            && !matches!(
+                cmd.as_str(),
+                "wifi_scan" | "wifi_connect" | "finish_provisioning"
+            )
+        {
+            return self.error(&cmd, NOT_FOR_PAIRED).await;
+        }
         let pin = self.pin().await;
+        let status = |s: &str| {
+            if show {
+                self.backend.status(s, &pin);
+            }
+        };
         match cmd.as_str() {
             "wifi_scan" => match self.backend.wifi_scan().await {
                 Ok(networks) => {
@@ -282,7 +386,7 @@ impl Session {
                     .and_then(Value::as_str)
                     .filter(|p| !p.is_empty())
                     .map(str::to_owned);
-                self.backend.status("wifi", &pin);
+                status("wifi");
                 self.send(json!({"evt": "wifi_status", "state": "connecting", "local_ip": ""}))
                     .await;
                 let mut result = self.backend.wifi_connect(ssid, psk).await;
@@ -297,7 +401,7 @@ impl Session {
                     .and_then(Value::as_str)
                     .filter(|k| !k.is_empty())
                     .map(str::to_owned);
-                self.backend.status("tailscale", &pin);
+                status("tailscale");
                 let me = self.clone();
                 let task = tokio::spawn(async move { me.watch_tailscale(key).await });
                 if let Ok(mut slot) = self.tailscale.lock() {
@@ -309,10 +413,48 @@ impl Session {
             "push_secrets" => self.push_secrets(&command).await,
             "finish_provisioning" => {
                 self.send(json!({"evt": "bye"})).await;
-                self.inner.lock().await.done = true;
-                self.backend.status("done", &pin);
+                let mut inner = self.inner.lock().await;
+                if paired && inner.allow_pin {
+                    // A PIN window stays open for the new phone it was opened for.
+                    inner.chan = None;
+                    inner.paired = None;
+                    inner.verified = false;
+                } else {
+                    inner.done = true;
+                    drop(inner);
+                    status("done");
+                }
             }
             _ => self.error(&cmd, "unknown command").await,
+        }
+    }
+
+    /// A paired phone proves its token (the keys are already bound to it); no new token.
+    async fn token_verify(&self, command: &Map<String, Value>) {
+        let proof = command
+            .get("proof")
+            .and_then(Value::as_str)
+            .and_then(lapis_crypto_hex)
+            .unwrap_or_default();
+        let answer = {
+            let mut inner = self.inner.lock().await;
+            let keys = inner.chan.as_ref().map(|c| c.keys().clone());
+            match (keys, inner.paired.clone()) {
+                (Some(k), Some(id)) if k.verify_client_proof(&proof) => {
+                    inner.verified = true;
+                    inner.failures = 0;
+                    Some((hex_encode(&k.server_proof()), id))
+                }
+                _ => None,
+            }
+        };
+        match answer {
+            Some((proof, id)) => {
+                tracing::info!(device_id = %id, "BLE: paired phone verified (Wi-Fi only)");
+                self.send(json!({"evt": "token_verified", "proof": proof, "device_id": id}))
+                    .await
+            }
+            None => self.failure().await,
         }
     }
 
@@ -469,6 +611,18 @@ mod tests {
         statuses: StdMutex<Vec<String>>,
         ts: StdMutex<NetStatus>,
         secrets: StdMutex<Vec<String>>,
+        paired: StdMutex<Vec<(String, String)>>,
+    }
+
+    const PHONE_TOKEN: &str = "phone-token-0123456789";
+
+    fn with_paired_phone() -> Arc<FakeBackend> {
+        let b = FakeBackend::default();
+        b.paired.lock().unwrap().push((
+            "dev_07".into(),
+            lapis_crypto::token::hash_token(PHONE_TOKEN),
+        ));
+        Arc::new(b)
     }
 
     impl Backend for FakeBackend {
@@ -506,9 +660,112 @@ mod tests {
                 Ok(keys)
             })
         }
+        fn paired_secrets(&self) -> Vec<(String, String)> {
+            self.paired.lock().unwrap().clone()
+        }
         fn status(&self, status: &str, _pin: &str) {
             self.statuses.lock().unwrap().push(status.into());
         }
+    }
+
+    fn token_secret(token: &str) -> String {
+        format!("tok:{}", lapis_crypto::token::hash_token(token))
+    }
+
+    /// A paired phone: proves its token, changes Wi-Fi, and nothing else.
+    #[tokio::test]
+    async fn paired_phone_changes_wifi_only() {
+        let backend = with_paired_phone();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let session = Session::new(backend.clone(), tx); // a PIN window accepts paired phones too
+        let mut phone = connect(&session, &token_secret(PHONE_TOKEN)).await;
+        let keys = phone_keys(&session, &phone, &token_secret(PHONE_TOKEN)).await;
+        phone
+            .send(
+                &session,
+                json!({"cmd": "token_verify", "proof": hex_encode(&keys.client_proof())}),
+            )
+            .await;
+        let v = phone.recv(&mut rx).unwrap();
+        assert_eq!(
+            (v["evt"].as_str(), v["device_id"].as_str()),
+            (Some("token_verified"), Some("dev_07"))
+        );
+        assert!(
+            v.get("api_token").is_none(),
+            "no new token for a paired phone"
+        );
+        let server = lapis_crypto_hex(v["proof"].as_str().unwrap()).unwrap();
+        assert!(keys.verify_server_proof(&server));
+        phone.send(&session, json!({"cmd": "wifi_scan"})).await;
+        assert_eq!(phone.recv(&mut rx).unwrap()["evt"], "wifi_list");
+        phone
+            .send(
+                &session,
+                json!({"cmd": "wifi_connect", "ssid": "home", "psk": "pw"}),
+            )
+            .await;
+        assert_eq!(phone.recv(&mut rx).unwrap()["state"], "connecting");
+        assert_eq!(phone.recv(&mut rx).unwrap()["state"], "connected");
+        for cmd in [
+            json!({"cmd": "tailscale_up", "authkey": null}),
+            json!({"cmd": "push_secrets", "secrets": {"ANTHROPIC_API_KEY": "sk-ant-x"}}),
+        ] {
+            phone.send(&session, cmd).await;
+            assert_eq!(phone.recv(&mut rx).unwrap()["message"], NOT_FOR_PAIRED);
+        }
+        assert!(backend.secrets.lock().unwrap().is_empty());
+        phone
+            .send(&session, json!({"cmd": "finish_provisioning"}))
+            .await;
+        assert_eq!(phone.recv(&mut rx).unwrap()["evt"], "bye");
+        assert!(
+            !session.is_done().await && !session.is_verified().await,
+            "the PIN window stays open for the new phone"
+        );
+        // The PIN screen went back to waiting: no verified / wifi / done.
+        assert_eq!(*backend.statuses.lock().unwrap(), ["connected", "waiting"]);
+    }
+
+    /// The phone Wi-Fi window shows no PIN, so a PIN never works there; nor does a wrong token,
+    /// a revoked one (absent from paired_secrets), or pin_verify on token keys.
+    #[tokio::test]
+    async fn paired_only_window_refuses_pin_and_unknown_phones() {
+        let backend = with_paired_phone();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let session = Session::paired_only(backend.clone(), tx);
+        let pin = session.pin().await;
+        let mut phone = connect(&session, &pin).await;
+        let proof = hex_encode(&phone.chan_keys_client_proof(&session).await);
+        phone
+            .send(&session, json!({"cmd": "pin_verify", "proof": proof}))
+            .await;
+        assert!(phone.recv(&mut rx).is_none(), "PIN keys are not offered");
+
+        let secret = token_secret(PHONE_TOKEN);
+        let mut phone = connect(&session, &secret).await;
+        let keys = phone_keys(&session, &phone, &secret).await;
+        phone
+            .send(
+                &session,
+                json!({"cmd": "pin_verify", "proof": hex_encode(&keys.client_proof())}),
+            )
+            .await;
+        assert!(phone.recv(&mut rx).is_none(), "pin_verify on token keys");
+
+        let mut stranger = connect(&session, &token_secret("not-paired")).await;
+        stranger
+            .send(&session, json!({"cmd": "token_verify", "proof": "00"}))
+            .await;
+        let mut disconnected = false;
+        while let Ok(o) = rx.try_recv() {
+            disconnected |= o == Outbound::Disconnect;
+        }
+        assert!(disconnected, "three failures lock out as with a wrong PIN");
+        assert!(
+            backend.statuses.lock().unwrap().is_empty(),
+            "no pairing screen"
+        );
     }
 
     struct Phone {
@@ -555,7 +812,7 @@ mod tests {
 
     #[tokio::test]
     async fn full_provisioning_flow() {
-        let backend = Arc::new(FakeBackend::default());
+        let backend = with_paired_phone(); // PIN pairing still works with phones paired before
         let (tx, mut rx) = mpsc::unbounded_channel();
         let session = Session::new(backend.clone(), tx);
         let pin = session.pin().await;

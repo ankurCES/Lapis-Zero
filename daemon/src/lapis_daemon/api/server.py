@@ -13,7 +13,13 @@ from typing import Any
 from aiohttp import web
 
 from lapis_daemon.agent.runner import Busy
-from lapis_daemon.api import routes_approvals, routes_chats, routes_config, routes_device
+from lapis_daemon.api import (
+    routes_approvals,
+    routes_chats,
+    routes_config,
+    routes_device,
+    routes_wifi,
+)
 from lapis_daemon.api.ws_hub import WsHub
 from lapis_daemon.config import API_BIND_HOST
 
@@ -79,7 +85,7 @@ def build_app(core: Any) -> web.Application:
     app[CORE] = core
     hub = app[HUB] = WsHub(core)
     app.router.add_get("/v1/ws", hub.handle)
-    for module in (routes_chats, routes_approvals, routes_config, routes_device):
+    for module in (routes_chats, routes_approvals, routes_config, routes_device, routes_wifi):
         module.setup(app)
     app.on_shutdown.append(lambda _app: hub.close())
     return app

@@ -185,6 +185,19 @@ impl Auth {
         })).collect::<Vec<_>>()})
     }
 
+    /// `(id, token hash hex)` of every paired phone not revoked: the keys of BLE paired-phone mode.
+    pub fn token_hashes(&self) -> Vec<(String, String)> {
+        self.devices
+            .lock()
+            .map(|l| {
+                l.iter()
+                    .filter(|d| !d.revoked)
+                    .map(|d| (d.id.clone(), d.token_hash.clone()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     pub fn paired_count(&self) -> usize {
         self.devices
             .lock()

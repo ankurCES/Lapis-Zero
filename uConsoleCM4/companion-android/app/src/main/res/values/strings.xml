@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">Lapis</string>
+    <string name="app_name">Lapis Zero</string>
     <string name="channel_approvals">Approval requests</string>
     <string name="channel_approvals_desc">High-risk agent actions waiting for your decision</string>
     <string name="channel_agent">Agent activity</string>

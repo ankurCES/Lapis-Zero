@@ -60,3 +60,24 @@ are the items only a real uConsole can confirm. Read the journal with
 - [ ] `ss -ltnp` shows lapis-daemon on 127.0.0.1:8421 only, and nothing of ours on 0.0.0.0.
 - [ ] Approval prompts appear on the HUD and the phone at the same time; either can decide.
 - [ ] Audio: speaker/headphone switching and no shutdown pop (clockworkpi-audio from the base image).
+
+## Wi-Fi (NET › Wi-Fi on the HUD, the app, Bluetooth from a paired phone)
+- [ ] NET › Wi-Fi shows the current network, address and signal; SCAN lists nearby networks.
+- [ ] Join a WPA2 network with the password typed on the keyboard: "Joined …", the address shows,
+      `/etc/NetworkManager/system-connections/lapis-<hex ssid>.nmconnection` is root 0600, and the
+      deck rejoins it by itself after a reboot.
+- [ ] A WPA3-only network joins too (its profile has `key-mgmt=sae`).
+- [ ] A wrong password: "Could not join …" and no profile is left (`nmcli connection show`).
+- [ ] The password never reaches a command line: during a join, as `lapis`,
+      `while :; do cat /proc/[0-9]*/cmdline 2>/dev/null | tr '\0' ' ' | grep -a '<the password>'; done`
+      prints nothing. `journalctl -u lapis-daemon`, the audit log (`/v1/deck/audit`) and the boot
+      report don't contain it either.
+- [ ] Forget a saved network: the profile is gone; forgetting the current one disconnects.
+- [ ] From the app over Tailscale: change Wi-Fi; the deck joins the new network and comes back on
+      Tailscale (the app may lose the old link mid-request: that must read as "switching").
+- [ ] Wi-Fi off/out of range for 30 s: the journal says "paired phones may set it over Bluetooth";
+      the app finds `LapisDeck-XXXX`, proves its pairing (no PIN), lists networks, joins one. No PIN
+      screen appears on the HUD, and a PIN from a new phone is refused in that window.
+- [ ] HUD "LET MY PHONE SET IT" opens the same window (5 min); a phone revoked in SYSTEM cannot use it.
+- [ ] In a normal pairing window (PIN on screen) an already-paired phone can still change only
+      Wi-Fi; SYSTEM › phones shows no new pairing.

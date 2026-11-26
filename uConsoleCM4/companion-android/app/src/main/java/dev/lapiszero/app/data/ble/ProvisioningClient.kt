@@ -61,14 +61,27 @@ sealed interface PinResult {
     data object LockedOut : PinResult
 }
 
+/** Outcome of [ProvisioningClient.verifyToken] (paired-phone mode, protocol section 4.2). */
+sealed interface TokenResult {
+    data class Verified(val deviceId: String) : TokenResult
+
+    /**
+     * No `token_verified` in time: a device that does not know the token stays silent (it only
+     * sees an envelope none of its keys opens). Either it was never paired with this phone, the
+     * pairing was revoked, or it is not listening for paired phones right now.
+     */
+    data object NotPaired : TokenResult
+}
+
 sealed interface TailscaleProgress {
     data class AuthUrl(val url: String) : TailscaleProgress
     data class Ready(val fqdn: String, val ip: String) : TailscaleProgress
 }
 
 /**
- * Phone side of `lapis-ble-v1` above the GATT link: handshake, PIN proof, sequenced AES-GCM
- * envelopes, chunking and reassembly, and the provisioning commands.
+ * Phone side of `lapis-ble-v1` above the GATT link: handshake, PIN proof (or, for a phone that
+ * is already paired, token proof), sequenced AES-GCM envelopes, chunking and reassembly, and the
+ * provisioning commands.
  *
  * Mirrors `daemon/src/lapis_daemon/ble_prov/session.py`:
  *  - a wrong PIN is met with silence (the device only sees a GCM failure), so a missing
@@ -212,6 +225,52 @@ class ProvisioningClient(
             PinResult.Verified(reply.deviceId, reply.apiToken)
         }
 
+    /**
+     * Paired-phone mode: proves this phone holds `apiToken` (the token of the device it is
+     * talking to, never a guess) and checks the device's proof in return. One try per handshake:
+     * the device counts a token it does not know as a failed attempt, like a wrong PIN. After
+     * [TokenResult.Verified] only the Wi-Fi commands and [finish] are allowed by the device.
+     *
+     * Throws [HandshakeException] when the device's proof does not verify (never trust that
+     * session) and [BleLinkLostException] when the link drops.
+     */
+    suspend fun verifyToken(apiToken: String, timeoutMs: Long = pinTimeoutMs): TokenResult =
+        commandLock.withLock {
+            require(apiToken.isNotEmpty()) { "no token" }
+            val sessionKeys = state.withLock {
+                val secret = shared ?: throw HandshakeException("handshake has not completed")
+                keys?.wipe()
+                BleEnvelopeCrypto.deriveKeysWithToken(
+                    secret, clientPub, devicePub, clientNonce, deviceNonce,
+                    BleEnvelopeCrypto.pairedSecret(apiToken),
+                ).also {
+                    keys = it
+                    txSeq = 1
+                    rxSeq = 1
+                }
+            }
+            val command = buildJsonObject {
+                put("cmd", "token_verify")
+                put("proof", BleEnvelopeCrypto.clientProof(sessionKeys).toHex())
+            }
+            val reply = try {
+                exchange("token_verify", command, timeoutMs) { it as? BleEvent.TokenVerified }
+            } catch (e: BleTimeoutException) {
+                // Silence is the device's answer to a token it does not know. This session is spent:
+                // another token on the same device would be a second guess, which is not done.
+                state.withLock { broken = true }
+                return@withLock TokenResult.NotPaired
+            }
+            val proof = reply.proofHex.hexToBytesOrNull()
+            val expected = BleEnvelopeCrypto.serverProof(sessionKeys)
+            if (proof == null || !BleEnvelopeCrypto.constantTimeEquals(expected, proof)) {
+                state.withLock { broken = true }
+                throw HandshakeException("The device failed to prove it knows this phone")
+            }
+            state.withLock { isVerified = true }
+            TokenResult.Verified(reply.deviceId)
+        }
+
     suspend fun wifiScan(timeoutMs: Long = 45_000): List<WifiNetwork> = verified {
         exchange("wifi_scan", command("wifi_scan"), timeoutMs) { (it as? BleEvent.WifiList)?.networks }
     }
@@ -302,7 +361,7 @@ class ProvisioningClient(
     private fun command(name: String): JsonObject = buildJsonObject { put("cmd", name) }
 
     private fun requireVerified() {
-        check(isVerified) { "PIN has not been verified" }
+        check(isVerified) { "PIN (or token) has not been verified" }
     }
 
     private suspend fun <T> verified(block: suspend () -> T): T {

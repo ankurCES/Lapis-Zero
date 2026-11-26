@@ -46,11 +46,11 @@ android {
                 )
                 // Opt-in: the integration tests against a running Lapis-Zero `lapis-daemon --mock`
                 // and Lapis-Deck `lapis-daemon --mock-hw`, and the contact sheets of the agent's
-                // head (`-Plapis.head.sheets=<directory>`).
+                // head (`-Plapis.head.sheets=<directory>`) and of the launcher icon (`-Plapis.icon.png=<file>`).
                 listOf(
                     "lapis.integration.url", "lapis.integration.token",
                     "lapis.deck.url", "lapis.deck.token",
-                    "lapis.head.sheets",
+                    "lapis.head.sheets", "lapis.icon.png",
                 ).forEach { key ->
                     providers.gradleProperty(key).orNull?.let { test.systemProperty(key, it) }
                 }

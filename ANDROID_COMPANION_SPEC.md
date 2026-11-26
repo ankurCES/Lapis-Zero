@@ -624,6 +624,24 @@ For `PUT /v1/config` and `PUT /v1/hosts` the message is the validation error of 
 the field and the rule. The rule cannot tell a password that happens to be made of letters and
 digits only from a name: the app must never offer a typed password to these fields.
 
+### 5.7 Changing Wi-Fi Only (normative; same JSON on Lapis-Deck)
+
+A paired phone changes the device's Wi-Fi without re-pairing or touching Tailscale: over this API
+when the device is reachable, over BLE paired-phone mode (`BLE_PROVISIONING_PROTOCOL.md` 4.2)
+when it is not.
+
+| Method | Path | Body | Answer |
+| --- | --- | --- | --- |
+| GET | `/v1/wifi` | | `{"ssid", "ip", "rssi": int\|null, "saved": [{"name", "active"}], "ble": {"open", "expires_at"}}` |
+| GET | `/v1/wifi/scan` | | `{"networks": [{"ssid", "rssi", "secured"}]}` (<= 20); 503 `wifi_unavailable` |
+| POST | `/v1/wifi/connect` | `{"ssid", "psk": str\|null}` | `{"state": "connected"\|"failed", "local_ip"}`; 422 `invalid` (ssid 1..32 bytes, psk 8..63 printable or 64 hex) |
+| POST | `/v1/wifi/forget` | `{"name"}` | the `GET /v1/wifi` body; 404 `not_found` |
+| POST | `/v1/wifi/ble` | | the `GET /v1/wifi` body with `ble.open` true (the phone Wi-Fi window); 409 `not_paired`, 503 `ble_unavailable` |
+
+`connect` can take ~45 s and moves the device off the network the phone may be using: a timeout
+or a dropped connection means "switching networks", not failure. The password never appears in
+an answer, a log line, the journal or a command line (NetworkManager keyfile, root 0600).
+
 ---
 
 ## 6. Android Companion App Specification (`android/`)

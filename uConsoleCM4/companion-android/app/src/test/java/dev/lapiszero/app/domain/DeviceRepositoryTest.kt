@@ -157,8 +157,27 @@ class DeviceRepositoryTest {
         val device = repo.state.value.active!!
         assertEquals("token-a", device.token)
         assertEquals("", device.kind)
+        assertEquals("", device.bleName)
         assertFalse(device.isDeck)
         assertTrue(device.timezoneSynced)
+    }
+
+    @Test
+    fun `the advertised bluetooth name is remembered, kept through provisioning and updated only when it changes`() {
+        val repo = DeviceRepository(store)
+        val pending = repo.add("LapisDeck-7F3A", null, "ble-token", "dev_01", bleName = "LapisDeck-7F3A")
+        val done = repo.completeProvisioning(pending.id, Endpoint("lapis-deck.tailnet.ts.net", tls = true), "lapis-deck")!!
+        assertEquals("LapisDeck-7F3A", done.bleName)
+        assertEquals("LapisDeck-7F3A", DeviceRepository(store).find(done.id)!!.bleName)
+        assertFalse("never in the log-safe string", done.toString().contains("ble-token"))
+
+        val writes = store.writes
+        repo.setBleName(done.id, "LapisDeck-7F3A")
+        repo.setBleName(done.id, "")
+        repo.setBleName("no-such-id", "LapisZero-0001")
+        assertEquals(writes, store.writes)
+        repo.setBleName(done.id, "LapisDeck-9B10") // a new radio after a board swap
+        assertEquals("LapisDeck-9B10", DeviceRepository(store).find(done.id)!!.bleName)
     }
 
     @Test

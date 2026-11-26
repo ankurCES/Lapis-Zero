@@ -3,6 +3,10 @@
 Started by lapis-daemon (via `lapis-ble-prov.service`) for an unpaired first
 boot or an explicit pairing window, and gone again when provisioning finishes
 or the window closes: no Bluetooth stack use and no Python interpreter at idle.
+
+The daemon writes the window's mode to `EffectivePaths.ble_mode_file` before each
+start: `pin` (the PIN on the LCD; paired phones are accepted too) or `wifi`, the
+phone Wi-Fi window (paired phones only, PIN refused, nothing on the pairing screen).
 """
 
 from __future__ import annotations
@@ -11,14 +15,21 @@ import asyncio
 import contextlib
 import json
 import signal
+import sqlite3
 import sys
 import time
 from typing import Any
 
-from lapis_daemon.api.auth import register_device_sync
+from lapis_daemon.api.auth import paired_hashes_sync, register_device_sync
 from lapis_daemon.ble_prov.network_ctl import NetworkCtl
 from lapis_daemon.ble_prov.session import ProvisioningSession
-from lapis_daemon.config import effective_paths, load_config, read_env_file, write_env_file
+from lapis_daemon.config import (
+    EffectivePaths,
+    effective_paths,
+    load_config,
+    read_env_file,
+    write_env_file,
+)
 from lapis_daemon.db import LapisDb
 from lapis_daemon.system_status import run_cmd
 
@@ -35,6 +46,14 @@ ADAPTER_IFACES = ("org.bluez.Adapter1", "org.bluez.GattManager1", "org.bluez.LEA
 
 def _log(message: str) -> None:
     print(f"lapis-ble-prov: {message}", flush=True)
+
+
+def window_mode(paths: EffectivePaths) -> str:
+    """`wifi` for the phone Wi-Fi window, else `pin` (also when the daemon wrote nothing)."""
+    try:
+        return "wifi" if paths.ble_mode_file.read_text().strip() == "wifi" else "pin"
+    except OSError:
+        return "pin"
 
 
 class DaemonLink:
@@ -89,6 +108,13 @@ class DeviceBackend:
 
     async def register_device(self, name: str, model: str) -> tuple[str, str]:
         return await asyncio.to_thread(self._register, name, model)
+
+    def paired_hashes(self) -> list[tuple[str, str]]:
+        try:
+            return paired_hashes_sync(self.db)
+        except sqlite3.Error as exc:  # paired phones are refused, the PIN still works
+            _log(f"paired phones unavailable: {type(exc).__name__}")
+            return []
 
     # The journal is the only trace of a pairing attempt on a device with no console
     # (the boot report copies it to the SD card). Step names and counts only: never a
@@ -208,7 +234,7 @@ async def power_on(adapter: Any) -> None:
         await asyncio.sleep(1)
 
 
-async def run() -> int:
+async def run(mode: str = "pin") -> int:
     from bluez_peripheral.advert import Advertisement
     from bluez_peripheral.util import get_message_bus
 
@@ -236,7 +262,8 @@ async def run() -> int:
         device = bus.get_proxy_object("org.bluez", service.device_path, introspection)
         await device.get_interface("org.bluez.Device1").call_disconnect()
 
-    session = ProvisioningSession(backend, service.notify, disconnect)
+    paired_only = mode == "wifi"
+    session = ProvisioningSession(backend, service.notify, disconnect, allow_pin=not paired_only)
     service.attach(session)
     await service.register(bus, adapter=adapter)
     advert = Advertisement(name, [SERVICE_UUID], 0, WINDOW_S)
@@ -245,8 +272,11 @@ async def run() -> int:
     _window_opened = True
     pump = asyncio.create_task(service.pump())
     asyncio.get_running_loop().add_signal_handler(signal.SIGTERM, session.done.set)
-    backend.status("waiting", session.pin)
-    print(f"lapis-ble-prov: advertising as {name} for {WINDOW_S}s", flush=True)
+    if not paired_only:
+        backend.status("waiting", session.pin)
+    which = "phone Wi-Fi window (paired phones only)" if paired_only else "pairing window"
+    print(f"lapis-ble-prov: {which}: advertising as {name} for {WINDOW_S}s", flush=True)
+    reported = 0.0  # the end of the phone Wi-Fi window last told to the daemon
 
     bluez_owner = await _bluez_owner(bus)
     next_check = started + BLUEZ_CHECK_S
@@ -260,6 +290,10 @@ async def run() -> int:
             limit = started + WINDOW_S
             if session.verified:
                 limit = max(limit, session.verified_at + VERIFIED_GRACE_S)
+            if paired_only and limit != reported:
+                reported = limit
+                expires_at = int(time.time() + limit - time.monotonic())
+                link.send_soon(type="wifi_ble", open=True, expires_at=expires_at)
             if time.monotonic() >= limit:
                 print("lapis-ble-prov: pairing window closed", flush=True)
                 break
@@ -271,14 +305,21 @@ async def run() -> int:
         await session.close()
         with contextlib.suppress(Exception):
             await service.unregister()
-        await link.send(type="pairing_event", mode="off")
+        await link.send(**_closed(mode))
         bus.disconnect()
     return 0
 
 
-async def _report_failure(message: str) -> None:
+def _closed(mode: str, **extra: Any) -> dict[str, Any]:
+    """The window is gone. The phone Wi-Fi window never had a pairing view to close."""
+    if mode == "wifi":
+        return {"type": "wifi_ble", "open": False, **extra}
+    return {"type": "pairing_event", "mode": "off", **extra}
+
+
+async def _report_failure(message: str, mode: str = "pin") -> None:
     link = DaemonLink(str(effective_paths().socket_path))
-    await asyncio.wait_for(link.send(type="pairing_event", mode="off", error=message), 3)
+    await asyncio.wait_for(link.send(**_closed(mode, error=message)), 3)
     # The daemon writes its state to every new client before it reads from it; exiting
     # before that greeting arrives resets the connection and the report is never read.
     await asyncio.wait_for(link.greeted.wait(), 3)
@@ -286,17 +327,19 @@ async def _report_failure(message: str) -> None:
 
 
 def main() -> int:
+    mode = window_mode(effective_paths())
     try:
-        return asyncio.run(run())
+        return asyncio.run(run(mode))
     except Exception as exc:  # noqa: BLE001 - one line in the journal, then exit
         # DBusError carries the BlueZ error name in .type (org.bluez.Error.Failed, ...).
         message = f"{getattr(exc, 'type', type(exc).__name__)}: {exc}"
         if isinstance(exc, RuntimeError):
             message = str(exc)  # our own, already worded for the LCD
         print(f"lapis-ble-prov: {message}", file=sys.stderr, flush=True)
-        # No adapter, rfkill, BlueZ down: say so on the LCD instead of failing silently.
+        # No adapter, rfkill, BlueZ down: say so on the LCD instead of failing silently
+        # (the phone Wi-Fi window only tells the daemon, which logs it).
         with contextlib.suppress(Exception):
-            asyncio.run(_report_failure(message[:80]))
+            asyncio.run(_report_failure(message[:80], mode))
         # Only a start-up failure is retried by the unit. A window that was open and
         # then died stays closed until someone asks again: BLE is strictly on demand.
         return 1 if _window_opened else EXIT_RETRY

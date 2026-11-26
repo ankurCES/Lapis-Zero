@@ -719,7 +719,11 @@ class AppSmokeTest {
     fun `dev connect pairs from the welcome screen and opens the workspace`() {
         container.sessions.start()
         show()
-        waitFor("Pair a new CardputerZero")
+        waitFor("Pair a new Lapis Zero")
+        compose.onNodeWithText("Supported devices").assertExists()
+        compose.onNodeWithText("• CardputerZero (M5Stack)").assertExists()
+        compose.onNodeWithText("• uConsole (ClockworkPi, CM4)").assertExists()
+        compose.onNodeWithText("LAPIS ZERO").assertExists()
         compose.onNodeWithText("Pair an existing device").assertExists()
         tap("Dev connect")
         waitFor("Pairing token")
@@ -758,8 +762,8 @@ class AppSmokeTest {
     fun `bluetooth wizard opens and explains what it needs`() {
         container.sessions.start()
         show()
-        waitFor("Pair a new CardputerZero")
-        tap("Pair a new CardputerZero")
+        waitFor("Pair a new Lapis Zero")
+        tap("Pair a new Lapis Zero")
         waitFor("Pair over Bluetooth")
         compose.onNodeWithText("Find").assertExists()
         compose.onNodeWithText("Verify").assertExists()

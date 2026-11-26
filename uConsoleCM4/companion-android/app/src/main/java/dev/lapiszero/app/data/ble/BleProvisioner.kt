@@ -27,11 +27,33 @@ import no.nordicsemi.android.ble.ktx.suspend
 import no.nordicsemi.android.ble.observer.ConnectionObserver
 
 /** A CardputerZero (`LapisZero-XXXX`) or Lapis-Deck (`LapisDeck-XXXX`) advertising the provisioning service. */
-class FoundDevice(val device: BluetoothDevice, val name: String, val rssi: Int) {
-    val address: String get() = device.address
-
+class FoundDevice(
+    val name: String,
+    val rssi: Int,
+    val address: String,
+    /** The platform handle; null only for test fakes. */
+    internal val device: BluetoothDevice? = null,
+) {
     /** From the advertised name; "" when it carries neither prefix. */
     val kind: String get() = BleUuids.kindOf(name)
+
+    /** Whether the name is a real `LapisZero-`/`LapisDeck-` advertisement worth remembering. */
+    val hasLapisName: Boolean get() = kind.isNotEmpty()
+}
+
+/** An open link to one device; always [close] it. */
+interface BleConnection : BleTransport {
+    suspend fun close()
+}
+
+/** Finding Lapis devices and connecting to one: [BleProvisioner] on a phone, a fake in tests. */
+interface BleAccess {
+    val isSupported: Boolean
+    val isEnabled: Boolean
+
+    fun scan(): Flow<List<FoundDevice>>
+
+    suspend fun connect(device: FoundDevice): BleConnection
 }
 
 /** Runtime permissions the BLE path needs on this Android version. */
@@ -54,23 +76,23 @@ object BlePermissions {
  * connects, requests ATT MTU 517 and exposes the link as a [BleTransport]. All protocol logic
  * lives in [ProvisioningClient]; this class only moves bytes.
  */
-class BleProvisioner(context: Context) {
+class BleProvisioner(context: Context) : BleAccess {
     private val appContext = context.applicationContext
 
     private val adapter: BluetoothAdapter?
         get() = appContext.getSystemService(BluetoothManager::class.java)?.adapter
 
-    val isSupported: Boolean
+    override val isSupported: Boolean
         get() = adapter != null &&
             appContext.packageManager.hasSystemFeature(PackageManager.FEATURE_BLUETOOTH_LE)
 
-    val isEnabled: Boolean get() = adapter?.isEnabled == true
+    override val isEnabled: Boolean get() = adapter?.isEnabled == true
 
     /**
      * Emits the growing, signal-sorted list of devices advertising the provisioning service.
      * Fails with [IOException] when Bluetooth is off, unsupported or not permitted.
      */
-    fun scan(): Flow<List<FoundDevice>> = callbackFlow {
+    override fun scan(): Flow<List<FoundDevice>> = callbackFlow {
         if (!BlePermissions.granted(appContext)) throw IOException("Bluetooth permission was not granted")
         val scanner = adapter?.takeIf { it.isEnabled }?.bluetoothLeScanner
             ?: throw IOException("Bluetooth is turned off")
@@ -79,7 +101,7 @@ class BleProvisioner(context: Context) {
             override fun onScanResult(callbackType: Int, result: ScanResult) {
                 // The advertised local name needs no extra permission, unlike BluetoothDevice.name.
                 val name = result.scanRecord?.deviceName?.takeIf { it.isNotBlank() } ?: "Lapis device"
-                found[result.device.address] = FoundDevice(result.device, name, result.rssi)
+                found[result.device.address] = FoundDevice(name, result.rssi, result.device.address, result.device)
                 trySend(found.values.sortedByDescending { it.rssi })
             }
 
@@ -106,6 +128,15 @@ class BleProvisioner(context: Context) {
         }
     }
 
+    override suspend fun connect(device: FoundDevice): BleLink {
+        val platform = device.device ?: try {
+            adapter?.getRemoteDevice(device.address)
+        } catch (e: IllegalArgumentException) {
+            null
+        } ?: throw IOException("Bluetooth is turned off")
+        return connect(platform)
+    }
+
     /** Connects, discovers the service, negotiates the MTU and enables EVT_RX notifications. */
     suspend fun connect(device: BluetoothDevice): BleLink {
         if (!BlePermissions.granted(appContext)) throw IOException("Bluetooth permission was not granted")
@@ -124,8 +155,8 @@ class BleProvisioner(context: Context) {
 }
 
 /** An open GATT connection. Always [close] it. */
-class BleLink internal constructor(private val manager: LapisBleManager) : BleTransport by manager {
-    suspend fun close() = manager.shutdown()
+class BleLink internal constructor(private val manager: LapisBleManager) : BleConnection, BleTransport by manager {
+    override suspend fun close() = manager.shutdown()
 }
 
 internal class LapisBleManager(context: Context) : BleManager(context), BleTransport {

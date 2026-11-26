@@ -114,6 +114,40 @@ fn crypto_vector() {
     assert_eq!(phone.open(&reply).unwrap(), b"{\"evt\":\"bye\"}");
 }
 
+/// Paired-phone mode (protocol 4.2): `"tok:" + sha256 hex(api_token)` in the PIN's place.
+#[test]
+fn paired_vector() {
+    let root = load("ble_crypto_vectors.json");
+    let (v, p) = (&root["crypto_vector"], &root["paired_vector"]);
+    let d = &p["derived"];
+    let client = Ephemeral::from_parts(arr(&v["client_priv_hex"]), arr(&v["client_nonce_hex"]));
+    let device = Ephemeral::from_parts(arr(&v["device_priv_hex"]), arr(&v["device_nonce_hex"]));
+    let shared = client.shared(&device.hello.public).unwrap();
+    let hash = lapis_crypto::token::hash_token(p["api_token"].as_str().unwrap());
+    assert_eq!(hash, p["token_hash_hex"].as_str().unwrap());
+    let secret = format!("tok:{hash}");
+    assert_eq!(secret, p["secret"].as_str().unwrap());
+    let t = ble::transcript(&client.hello, &device.hello);
+    assert_eq!(ble::salt(&t, &secret).to_vec(), hex(&d["salt_hex"]));
+    let keys = ble::derive(&shared, &client.hello, &device.hello, &secret);
+    assert_eq!(keys.c2d.to_vec(), hex(&d["k_c2d_hex"]));
+    assert_eq!(keys.d2c.to_vec(), hex(&d["k_d2c_hex"]));
+    assert_eq!(keys.pin.to_vec(), hex(&d["k_pin_hex"]));
+    assert_eq!(keys.client_proof().to_vec(), hex(&d["client_proof_hex"]));
+    assert_eq!(keys.server_proof().to_vec(), hex(&d["server_proof_hex"]));
+    let plaintext = p["plaintext_utf8"].as_str().unwrap().as_bytes();
+    let envelope = ble::seal(&keys.c2d, DIR_C2D, 1, plaintext).unwrap();
+    assert_eq!(envelope, hex(&d["envelope_hex"]));
+    // The PIN keys of the same handshake cannot open it.
+    let pin = ble::derive(
+        &shared,
+        &client.hello,
+        &device.hello,
+        v["pin"].as_str().unwrap(),
+    );
+    assert!(ble::open(&pin.c2d, DIR_C2D, &envelope, 1).is_err());
+}
+
 #[test]
 fn handshake_rejections() {
     assert_eq!(Hello::decode(&[1; 48]), Err(ble::CryptoError::HelloLength));

@@ -153,7 +153,7 @@ class BleWizardViewModel(
         try {
             closeLink()
             expectDisconnect = false
-            val opened = ble.connect(device.device)
+            val opened = ble.connect(device)
             link = opened
             val session = ProvisioningClient(opened)
             client = session
@@ -178,7 +178,7 @@ class BleWizardViewModel(
             is BleStep.Verifying, is BleStep.Secrets -> Unit
             else -> fail(
                 "The Bluetooth connection was lost. Keep the phone next to the device and start again " +
-                    "(on the device: Menu -> Pair Android App).",
+                    "(open the pairing screen on the device again).",
             )
         }
     }
@@ -201,6 +201,8 @@ class BleWizardViewModel(
                         pendingId = devices.add(
                             current.deviceName, null, result.apiToken, result.deviceId,
                             kind = BleUuids.kindOf(current.deviceName),
+                            // Remembered so "Change Wi-Fi" can find this device over Bluetooth again.
+                            bleName = target?.name?.takeIf { target?.hasLapisName == true }.orEmpty(),
                         ).id
                         _step.value = BleStep.Wifi(scanning = true)
                         scanWifi()

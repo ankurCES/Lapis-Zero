@@ -63,6 +63,10 @@ pub struct Model {
     pub config: Value,
     /// GET /v1/secrets/status: presence and masked tails.
     pub secrets: Value,
+    /// `GET /v1/wifi`, the last scan, and what the Wi-Fi pane is waiting for ("" = nothing).
+    pub wifi: Value,
+    pub wifi_networks: Vec<Value>,
+    pub wifi_busy: String,
     pub tool_results: BTreeMap<String, Value>,
     pub tool_busy: BTreeMap<String, bool>,
     pub toasts: VecDeque<Toast>,
@@ -320,6 +324,9 @@ impl Model {
                 self.tool_results
                     .insert(name.clone(), json!({"ok": false, "error": msg}));
             }
+            if matches!(tag, Tag::WifiScan | Tag::WifiConnect(_)) {
+                self.wifi_busy.clear();
+            }
             // The top bar already says when the harness is down; polling must not spam it.
             let harness_down = v["error"]["code"] == "harness_unavailable";
             if !matches!(tag, Tag::Ignore) && !harness_down {
@@ -389,6 +396,34 @@ impl Model {
             Tag::HostsSaved => {
                 self.hosts = v;
                 self.toast("info", "Fleet hosts saved");
+            }
+            Tag::Wifi => self.wifi = v,
+            Tag::WifiScan => {
+                self.wifi_busy.clear();
+                self.wifi_networks = v["networks"].as_array().cloned().unwrap_or_default();
+            }
+            Tag::WifiConnect(ssid) => {
+                self.wifi_busy.clear();
+                if v["state"] == "connected" {
+                    let ip = Self::str_of(&v, "local_ip").to_owned();
+                    self.toast("info", format!("Joined {ssid} ({ip})"));
+                } else {
+                    self.toast(
+                        "error",
+                        format!("Could not join {ssid}: wrong password or out of range"),
+                    );
+                }
+            }
+            Tag::WifiForget(name) => {
+                self.wifi = v;
+                self.toast("info", format!("Forgot {name}"));
+            }
+            Tag::WifiBle => {
+                self.wifi = v;
+                self.toast(
+                    "info",
+                    "Paired phones can set Wi-Fi over Bluetooth for 5 minutes",
+                );
             }
             Tag::Screenshot(_) | Tag::HostScreen(_) | Tag::Ignore => {}
         }

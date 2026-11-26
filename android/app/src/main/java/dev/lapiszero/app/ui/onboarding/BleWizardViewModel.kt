@@ -177,7 +177,7 @@ class BleWizardViewModel(
             is BleStep.Verifying, is BleStep.Secrets -> Unit
             else -> fail(
                 "The Bluetooth connection was lost. Keep the phone next to the device and start again " +
-                    "(on the device: Menu -> Pair Android App).",
+                    "(open the pairing screen on the device again).",
             )
         }
     }

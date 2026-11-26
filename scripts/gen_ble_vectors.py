@@ -46,6 +46,22 @@ aad = PROTO_VER + bytes([DIR_BYTE]) + seq_be
 ct_and_tag = AESGCM(k_c2d).encrypt(nonce, PLAINTEXT, aad)
 envelope = seq_be + ct_and_tag
 
+# Paired-phone mode (protocol section 4.2): the same handshake, but the PIN in the salt is
+# replaced by "tok:" + hex SHA-256 of the api_token the phone got when it paired.
+API_TOKEN = "lapis-paired-phone-test-token-0123456789AB"
+token_hash = hashlib.sha256(API_TOKEN.encode("ascii")).hexdigest()
+p_secret = "tok:" + token_hash
+p_salt = hashlib.sha256(transcript + p_secret.encode("ascii")).digest()
+
+def p_expand(label: bytes) -> bytes:
+    return HKDF(algorithm=hashes.SHA256(), length=32, salt=p_salt, info=label).derive(shared)
+
+p_c2d, p_d2c, p_pin = p_expand(b"lapis-ble-v1-c2d"), p_expand(b"lapis-ble-v1-d2c"), p_expand(b"lapis-ble-v1-pin-confirm")
+p_client = hmac.new(p_pin, b"client-pin-proof" + transcript, hashlib.sha256).digest()
+p_server = hmac.new(p_pin, b"server-pin-proof" + transcript, hashlib.sha256).digest()
+P_PLAINTEXT = ('{"cmd":"token_verify","proof":"' + p_client.hex() + '"}').encode()
+p_envelope = seq_be + AESGCM(p_c2d).encrypt(nonce, P_PLAINTEXT, aad)
+
 out = Path(__file__).resolve().parent.parent / "tests" / "vectors" / "ble_crypto_vectors.json"
 out.parent.mkdir(parents=True, exist_ok=True)
 out.write_text(json.dumps({
@@ -70,6 +86,16 @@ out.write_text(json.dumps({
             "k_d2c_hex": k_d2c.hex(), "k_pin_hex": k_pin.hex(),
             "client_proof_hex": client_proof.hex(), "server_proof_hex": server_proof.hex(),
             "nonce_hex": nonce.hex(), "aad_hex": aad.hex(), "envelope_hex": envelope.hex(),
+        },
+    },
+    "paired_vector": {
+        "comment": "crypto_vector keys, nonces, seq and dir; secret replaces the PIN",
+        "api_token": API_TOKEN, "token_hash_hex": token_hash, "secret": p_secret,
+        "plaintext_utf8": P_PLAINTEXT.decode("utf-8"),
+        "derived": {
+            "salt_hex": p_salt.hex(), "k_c2d_hex": p_c2d.hex(), "k_d2c_hex": p_d2c.hex(),
+            "k_pin_hex": p_pin.hex(), "client_proof_hex": p_client.hex(),
+            "server_proof_hex": p_server.hex(), "envelope_hex": p_envelope.hex(),
         },
     },
 }, indent=2) + "\n")

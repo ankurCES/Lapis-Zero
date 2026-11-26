@@ -6,6 +6,36 @@ subsystems, and hosts a policy-gated agent that operates the deck's own radios a
 machines on your Tailscale tailnet (VNC/SSH, or the agent CLIs installed on them). The existing
 Lapis-Zero Android companion app pairs with it and controls it, unchanged.
 
+<table>
+  <tr>
+    <td width="50%"><img src="screenshots/hud/01-agent.png" alt="AGENT workspace: start a chat on the deck or a tailnet host"></td>
+    <td width="50%"><img src="screenshots/hud/02-rf-waterfall.png" alt="RF workspace: live spectrum and waterfall"></td>
+  </tr>
+  <tr>
+    <td align="center">Command center: chats on the deck or any tailnet machine</td>
+    <td align="center">RF: spectrum and waterfall</td>
+  </tr>
+  <tr>
+    <td><img src="screenshots/hud/03-mesh.png" alt="MESH workspace: Meshtastic nodes with SNR, RSSI and distance"></td>
+    <td><img src="screenshots/hud/04-net-wifi.png" alt="NET workspace: the deck's Wi-Fi, scan, join and forget"></td>
+  </tr>
+  <tr>
+    <td align="center">Meshtastic nodes</td>
+    <td align="center">Wi-Fi: scan, join, forget, or let the phone set it</td>
+  </tr>
+  <tr>
+    <td><img src="screenshots/hud/05-fleet-add-host.png" alt="FLEET workspace: add a tailnet machine for the agent"></td>
+    <td></td>
+  </tr>
+  <tr>
+    <td align="center">Fleet: add a machine from the tailnet</td>
+    <td></td>
+  </tr>
+</table>
+
+The HUD with dummy data (`scripts/preview.sh`: mock daemon and harness, synthetic IQ, a mock fleet
+and mesh); on the deck it fills the uConsole's 1280x720 panel.
+
 ```
 crates/lapis-crypto   lapis-ble-v1 crypto (X25519/HKDF/AES-GCM), tokens, secret redaction
 crates/lapis-daemon   127.0.0.1:8421 control plane, Policy Gate, BLE provisioning, hardware, tools

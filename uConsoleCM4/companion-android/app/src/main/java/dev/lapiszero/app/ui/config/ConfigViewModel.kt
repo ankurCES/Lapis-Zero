@@ -12,8 +12,16 @@ import dev.lapiszero.app.data.remote.ScheduleCreate
 import dev.lapiszero.app.data.remote.SchedulePatch
 import dev.lapiszero.app.data.remote.SecretStatus
 import dev.lapiszero.app.domain.ChatRepository
+import dev.lapiszero.app.domain.HostEntry
+import dev.lapiszero.app.domain.HostOffer
+import dev.lapiszero.app.domain.HostPushOutcome
+import dev.lapiszero.app.domain.HostSync
+import dev.lapiszero.app.domain.PairedDevice
 import dev.lapiszero.app.domain.SshSupport
 import java.io.IOException
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -376,6 +384,8 @@ object ConfigRules {
 class ConfigViewModel(
     private val api: LapisApiClient,
     private val repo: ChatRepository,
+    /** The other paired devices and this phone's host book; null keeps everything on this device. */
+    private val sync: HostSync? = null,
 ) : ViewModel() {
     private val _hosts = MutableStateFlow(Section<HostsResponse>())
     val hosts: StateFlow<Section<HostsResponse>> = _hosts.asStateFlow()
@@ -455,6 +465,54 @@ class ConfigViewModel(
 
     fun loadHosts() = load(_hosts) { api.hosts() }
 
+    /** This device (id and name) and the other paired devices a host can also be saved to. */
+    val selfId: String get() = sync?.selfId.orEmpty()
+    val selfName: String get() = sync?.selfName ?: "this device"
+
+    fun otherDevices(): List<PairedDevice> = sync?.others().orEmpty()
+
+    private val _offers = MutableStateFlow(Section<List<HostOffer>>())
+
+    /** Hosts of the other paired devices that this one lacks, for "Copy hosts from another device". */
+    val offers: StateFlow<Section<List<HostOffer>>> = _offers.asStateFlow()
+
+    fun loadOffers() {
+        val fleet = sync ?: return
+        val have = _hosts.value.data?.hosts?.keys.orEmpty()
+        load(_offers) { fleet.offers(have) }
+    }
+
+    /**
+     * Copies hosts (by the device they come from and their id) onto this device, with every
+     * password this phone knows for them; the result says which still need one.
+     */
+    fun copyHosts(picks: List<Pair<String, String>>, onDone: (Boolean) -> Unit = {}) {
+        val fleet = sync
+        val offers = _offers.value.data
+        if (fleet == null || offers == null || picks.isEmpty()) {
+            onDone(false)
+            return
+        }
+        val entries = picks.distinctBy { it.second }.mapNotNull { (deviceId, hostId) ->
+            val offer = offers.firstOrNull { it.device.id == deviceId } ?: return@mapNotNull null
+            val host = offer.hosts[hostId] ?: return@mapNotNull null
+            HostEntry(originalId = null, id = hostId, host = host, sourceSet = offer.storedSecrets)
+        }
+        save("Could not copy the hosts", onDone) {
+            when (val result = fleet.push(api, entries)) {
+                is HostPushOutcome.Saved -> {
+                    _hosts.value = Section(data = result.hosts)
+                    result.secrets?.let { _secrets.value = Section(data = it) }
+                    _offers.update { s -> s.copy(data = s.data?.map { o -> o.copy(hosts = o.hosts - result.saved.toSet()) }) }
+                    _messages.emit(HostSync.describeCopy(result))
+                }
+
+                HostPushOutcome.Unreachable -> throw IOException("Could not reach the device")
+                is HostPushOutcome.Failed -> throw IOException(result.reason)
+            }
+        }
+    }
+
     /** Whether the device software has the SSH features, and the device's own public key if so. */
     val sshSupport: StateFlow<SshSupport> = repo.sshSupport
 
@@ -469,21 +527,33 @@ class ConfigViewModel(
      * `sshPassword` is the same for an SSH login that differs from the screen's, under
      * `host.ssh.passwordEnv`; both go to the vault in one write.
      */
+    /**
+     * `alsoTo`: ids of other paired devices to write the host (and the passwords typed here) to as
+     * well, each through its own endpoint and token; `here` false leaves this device out.
+     */
     fun saveHost(
         originalId: String?,
         id: String,
         host: Host,
         vncPassword: String? = null,
         sshPassword: String? = null,
+        alsoTo: Set<String> = emptySet(),
+        here: Boolean = true,
         onDone: (Boolean) -> Unit = {},
     ) {
         val current = _hosts.value.data?.hosts.orEmpty()
+        val others = sync?.others().orEmpty().filter { it.id in alsoTo }
+        if (!here && others.isEmpty()) {
+            reject("Choose at least one device to save the host to")
+            onDone(false)
+            return
+        }
         if (!ConfigRules.isValidHostId(id)) {
             reject("Host id may only contain letters, digits, - and _")
             onDone(false)
             return
         }
-        if (id != originalId && id in current) {
+        if (here && id != originalId && id in current) {
             reject("A host named $id already exists")
             onDone(false)
             return
@@ -516,7 +586,7 @@ class ConfigViewModel(
         }
         // Device software from before the SSH features does not know `ssh.password_env`: a host
         // goes back with what came from the device (nothing), and no SSH password is stored.
-        if (repo.sshSupport.value !is SshSupport.Ready &&
+        if (here && repo.sshSupport.value !is SshSupport.Ready &&
             (sshPass != null || host.ssh.passwordEnv != current[originalId ?: id]?.ssh?.passwordEnv)
         ) {
             reject(ChatRepository.NO_SSH_FEATURES)
@@ -532,9 +602,25 @@ class ConfigViewModel(
             if (sshPass != null) put(sshEnv, sshPass)
         }
         save("Could not save the host", onDone) {
-            if (passwords.isNotEmpty()) _secrets.value = Section(data = api.patchSecrets(set = passwords))
-            _hosts.value = Section(data = api.putHosts(next))
-            _messages.emit("Host $id saved")
+            if (here) {
+                if (passwords.isNotEmpty()) _secrets.value = Section(data = api.patchSecrets(set = passwords))
+                _hosts.value = Section(data = api.putHosts(next))
+            }
+            sync?.book?.remember(id, passwords)
+            val fleet = sync
+            if (fleet == null || others.isEmpty()) {
+                _messages.emit("Host $id saved")
+                return@save
+            }
+            // Where a password is known to be needed: what is set here, plus what was just typed.
+            val sourceSet = _secrets.value.data?.filter { it.isSet }?.map { it.name }?.toSet()?.plus(passwords.keys)
+            val entry = HostEntry(originalId, id, host, passwords, sourceSet)
+            val results = coroutineScope {
+                others.map { device -> async { device.name to fleet.pushTo(device, listOf(entry)) } }.awaitAll()
+            }
+            val parts = listOfNotNull("saved on ${fleet.selfName}".takeIf { here }) +
+                results.map { (name, outcome) -> HostSync.describe(name, id, outcome) }
+            _messages.emit("Host $id: " + parts.joinToString("; "))
         }
     }
 
@@ -628,6 +714,7 @@ class ConfigViewModel(
 
     fun unsetSecret(name: String) = save("Could not remove the secret") {
         _secrets.value = Section(data = api.patchSecrets(unset = listOf(name)))
+        sync?.book?.forget(listOf(name))
         _messages.emit("$name removed")
     }
 

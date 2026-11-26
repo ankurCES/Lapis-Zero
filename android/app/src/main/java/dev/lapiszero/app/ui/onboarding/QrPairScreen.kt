@@ -103,7 +103,7 @@ fun QrPairScreen(vm: PairingViewModel, onBack: () -> Unit, onFinished: () -> Uni
 
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Text(
-                "On the CardputerZero choose Menu -> Pair Android App (QR), then point the camera at its screen.",
+                "On a CardputerZero choose Menu -> Pair Android App (QR); on a uConsole show the pairing QR in [7] SYSTEM. Then point the camera at its screen.",
                 style = MaterialTheme.typography.bodyMedium,
             )
             Box(

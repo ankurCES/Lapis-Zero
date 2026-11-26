@@ -44,9 +44,10 @@ android {
                     "lapis.vectors",
                     rootProject.file("../tests/vectors/ble_crypto_vectors.json").absolutePath,
                 )
-                // Opt-in: the integration test against a running `lapis-daemon --mock`, and
-                // the contact sheets of the agent's head (`-Plapis.head.sheets=<directory>`).
-                listOf("lapis.integration.url", "lapis.integration.token", "lapis.head.sheets").forEach { key ->
+                // Opt-in: the integration test against a running `lapis-daemon --mock`, the contact
+                // sheets of the agent's head (`-Plapis.head.sheets=<directory>`) and of the launcher
+                // icon (`-Plapis.icon.png=<file>`).
+                listOf("lapis.integration.url", "lapis.integration.token", "lapis.head.sheets", "lapis.icon.png").forEach { key ->
                     providers.gradleProperty(key).orNull?.let { test.systemProperty(key, it) }
                 }
             }

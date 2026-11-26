@@ -448,3 +448,56 @@ HUD on screen 15 s after boot, uConsole keyboard/gamepad found, BLE pairing → 
   checks passed (meshtasticd drop-in verifies, radio config present, meshtasticd in spi/gpio, Lapis
   Plymouth theme selected, `splash` on the cmdline). The staged lapis-daemon / lapis-ui are fresh
   aarch64 builds carrying the region code. Gates before: `scripts/verify.sh` 7/7 PASS.
+- **On hardware** (2026-11-25): card flashed with that image (`flash.sh /dev/disk4`, rootfs verified
+  byte for byte, bootfs file by file), seeded with `lapis-seed/deck.toml` (`mesh_region = "US"`);
+  the user reports everything working on the uConsole. Beads `ankur-3hf.12`-`.14` closed.
+
+## Wi-Fi without re-pairing, HUD Wi-Fi screen (2026-11-26, beads `ankur-3hf.15`-`.18`)
+
+- **BLE paired-phone mode** (`lapis-ble-v1` section 4.2, documented in Lapis-Zero's
+  `BLE_PROVISIONING_PROTOCOL.md`): same handshake; a phone paired earlier puts
+  `"tok:" + sha256 hex(api_token)` where the PIN goes. The device derives one key set per paired,
+  non-revoked phone (plus the PIN's when a PIN is on screen); the first envelope that opens picks
+  the mode. `token_verify` -> `token_verified` (no new token), then only `wifi_scan`, `wifi_connect`,
+  `finish_provisioning`. Wrong/revoked token = a failed attempt (same 3-strike lockout). No crypto
+  change; the frozen `paired_vector` was added to `tests/vectors/ble_crypto_vectors.json` (both repos,
+  byte-identical, old sections unchanged) and is tested in Rust, Python and Kotlin.
+- **Phone Wi-Fi window**: paired phones only, no PIN, no pairing screen; opens once per offline
+  episode (paired, Wi-Fi unconnected 30 s; `app::OfflineWatch`) or from the HUD / `POST /v1/wifi/ble`.
+  A PIN pairing window replaces it and accepts paired phones too.
+- **REST** (same JSON on Lapis-Zero): `GET /v1/wifi`, `GET /v1/wifi/scan`, `POST /v1/wifi/connect`,
+  `POST /v1/wifi/forget`, `POST /v1/wifi/ble`. Audited (`wifi_connect` / `wifi_forget`, never the
+  password); the password is registered with the redactor first.
+- **The password never on a command line**: `nmcli … password <psk>` was readable in
+  `/proc/*/cmdline` by `lapis`. Secured networks now get a 0600 NetworkManager keyfile (SSID as a byte
+  list, `sae` for WPA3-only, GKeyFile escaping), `nmcli connection load` + `up uuid`, deleted again on
+  failure. Open networks keep `nmcli dev wifi connect`. The BLE path uses the same code.
+- **HUD**: NETOPS › Wi-Fi (`crates/lapis-ui/src/ws/wifi.rs`, first section): current network, scan,
+  pick a network, password typed on the keyboard (masked; cleared once sent), connect, forget saved
+  networks, "let my phone set it" (opens the window). Palette entry "Wi-Fi: join, forget, …".
+- Files: `crates/lapis-daemon/src/{ble/session.rs,ble/mod.rs,net.rs,app.rs,api.rs,auth.rs}`,
+  `crates/lapis-daemon/tests/api.rs`, `crates/lapis-crypto/tests/vectors.rs`,
+  `crates/lapis-ui/src/{ws/wifi.rs,ws/net.rs,ws/mod.rs,client.rs,model.rs,app.rs}`,
+  `crates/lapis-ui/tests/hud.rs`, `scripts/gen_ble_vectors.py`, `tests/vectors/ble_crypto_vectors.json`,
+  `os-image/HARDWARE_CHECKLIST.md` (new "Wi-Fi" section).
+- New tests: session (paired phone changes Wi-Fi only; paired-only window refuses PIN, wrong and
+  revoked tokens), `net` (keyfile rendering; the PSK in no argv, 0600, nothing left on failure; saved
+  list), API (`wifi_over_the_api`, `phone_window_opens_once_per_offline_episode`), vectors
+  (`paired_vector`), HUD (`wifi_join_forget_and_phone_window_from_the_keyboard`).
+- **App** (`companion-android/`, one app for both devices): Device tab › Wi-Fi › **Change Wi-Fi**:
+  over `/v1/wifi*` when reachable (a dropped connect reads "switching networks", never resent),
+  otherwise over BLE paired-phone mode with that device's token only (remembered advertised name
+  `ble_name` preselects it; ~8 s silence = "not paired with this phone"). **KVM hosts on any paired
+  device**: host form "Save to" (each device through its own endpoint and token, per-device result),
+  Hosts › "Copy hosts from another device" (passwords the phone has seen travel from a Keystore-sealed
+  host book; others flagged). **Name "Lapis Zero"**, adaptive icon (the agent's head on lapis with gold
+  flecks, themed layer), pairing card "Pair a new Lapis Zero" + supported devices (CardputerZero,
+  uConsole). `./gradlew test assembleDebug`: 339 tests, 329 passed, 0 failed, 10 skipped (was 309/299).
+- Gates (`scripts/verify.sh`, 2026-11-26): fmt, clippy `-D warnings`, `cargo test --workspace`,
+  harness ruff + pytest (288 passed, 1 xfailed), `./gradlew test assembleDebug`, shellcheck: **7/7 PASS**.
+- Installed on the Pixel (`adb install -r`, 2026-11-26 11:46). Not yet tried against real devices:
+  BLE paired-phone mode, `/v1/wifi*`, host copy, themed icon (see HARDWARE_CHECKLIST "Wi-Fi").
+- **Image rebuilt** (`os-image/build.sh`, 2026-11-26, exit 0): `lapis-deck-cm4-trixie-arm64.img.xz`
+  839,337,592 bytes, SHA-256 `676c9e33f1a45d3bf0c1b4f4903397ee22008a4dcdb4ac51dfcf562a1e2a12ab`; `shasum -c` and `xz -t` OK. The aarch64
+  lapis-daemon (with `bluez`, so the phone-window code compiled for Linux) and lapis-ui were built
+  fresh from this tree.

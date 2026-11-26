@@ -51,6 +51,9 @@ sealed interface BleEvent {
         override fun toString(): String = "PinVerified(deviceId=$deviceId)"
     }
 
+    /** Paired-phone mode: the device knew this phone's token. No new token is issued. */
+    data class TokenVerified(val proofHex: String, val deviceId: String) : BleEvent
+
     data class WifiList(val networks: List<WifiNetwork>) : BleEvent
     data class WifiStatus(val state: String, val localIp: String) : BleEvent
     data class TailscaleAuth(val url: String) : BleEvent
@@ -76,6 +79,7 @@ sealed interface BleEvent {
             fun str(key: String): String = (obj[key] as? JsonPrimitive)?.contentOrNull.orEmpty()
             return when (val evt = str("evt")) {
                 "pin_verified" -> PinVerified(str("proof"), str("device_id"), str("api_token"))
+                "token_verified" -> TokenVerified(str("proof"), str("device_id"))
                 "wifi_list" -> WifiList(
                     (obj["networks"] as? JsonArray).orEmpty().mapNotNull {
                         runCatching { LapisJson.decodeFromJsonElement<WifiNetwork>(it) }.getOrNull()

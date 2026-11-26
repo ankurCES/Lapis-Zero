@@ -8,7 +8,7 @@ This appendix defines the exact byte-level wire protocol shared between `daemon/
 
 * **Advertised Local Name:** `LapisZero-<LAST4_MAC>` (uppercase hex, e.g., `LapisZero-4F2A`)
 * **Primary Service UUID:** `7c4f0001-9a3b-4c6e-8e21-51a0c0de0001`
-* **On-Demand Lifecycle:** `lapis-ble-prov.service` advertises only during unpaired first boot or an explicit 5-minute pairing window (`Menu -> Pair Android App`). It shuts down immediately after `finish_provisioning` or timeout.
+* **On-Demand Lifecycle:** `lapis-ble-prov.service` advertises only during unpaired first boot, an explicit 5-minute pairing window (`Menu -> Pair Android App`), or the 5-minute **phone Wi-Fi window** for an already paired phone (section 4.2). It shuts down immediately after `finish_provisioning` or timeout.
 
 | Characteristic | UUID | Properties | Purpose |
 | :--- | :--- | :--- | :--- |
@@ -145,6 +145,59 @@ After exchanging `ClientHello` / `ServerHello` and enabling notifications on `EV
 * **Pairing window:** advertising stops after 300 s; a phone that has already verified the PIN
   gets up to 600 s from that moment to finish Wi-Fi and Tailscale setup.
 
+### 4.2 Paired-Phone Mode (Wi-Fi change without a PIN)
+
+A phone that paired earlier can change the device's Wi-Fi over BLE without a PIN, for when the
+device has no network the phone can reach it on. No crypto change: same UUIDs, same advertised
+name, same `ClientHello` / `ServerHello`, same key schedule, framing and envelopes.
+
+* **Secret:** the phone uses `secret = "tok:" + lowercase hex SHA-256(api_token)` (68 ASCII
+  characters) in place of the PIN: `salt = SHA256(transcript || ASCII(secret))`, then
+  `k_c2d`, `k_d2c` and `k_pin` exactly as in section 3.2. The device side's hash is exactly the
+  `token_hash` column of `paired_devices`.
+* **Proof (`CMD_TX`, `seq = 1`):** `client_proof = HMAC-SHA256(k_pin, b"client-pin-proof" || transcript)`
+  ```json
+  {"cmd":"token_verify","proof":"<64-char-hex>"}
+  ```
+* **Mode decision:** at the handshake the device derives one key set per candidate: the PIN's
+  (only when a PIN is on the LCD) and one per non-revoked paired phone. The first envelope that
+  opens with one of them decides the session's mode for good. When none opens, that is one
+  failed attempt, counted, rotated and locked out exactly like a wrong PIN (section 4, rule 3).
+  The candidates stay until a key set opens, so a phone may retry at `seq = 1`.
+* **Answer (`EVT_RX`, `seq = 1`):** `server_proof = HMAC-SHA256(k_pin, b"server-pin-proof" || transcript)`,
+  checked by the phone in constant time. No new token is minted.
+  ```json
+  {"evt":"token_verified","proof":"<64-char-hex>","device_id":"dev_07"}
+  ```
+* **Wrong mode:** `pin_verify` in a token-keyed session, or `token_verify` in a PIN-keyed
+  session, is a failed attempt.
+* **Allowed commands** after `token_verified`: `wifi_scan`, `wifi_connect`,
+  `finish_provisioning` only. Any other command is answered with
+  `{"evt":"error","cmd":"<cmd>","message":"not allowed for a paired phone"}` and the session stays.
+* **Pairing screen:** a paired-phone session never changes it (no PIN view, no
+  `verified` / `wifi` / `done` statuses). In a PIN window the handshake still shows
+  "Phone connected" (the mode is not known yet); it returns to "Waiting for phone" as soon as
+  a paired phone's key set opens, and that phone's `finish_provisioning` answers `bye` without
+  closing the PIN window.
+* **When the device listens for a paired phone:**
+  1. during a normal pairing window (PIN on the LCD): PIN and paired-phone mode are both accepted;
+  2. during the **phone Wi-Fi window**: paired phones only, PIN pairing refused, nothing on the
+     pairing screen. It opens by itself once per offline episode (the device has at least one
+     paired phone and Wi-Fi has had no connection for 30 s; re-armed when Wi-Fi connects again),
+     or on demand with `POST /v1/wifi/ble`. It advertises for 300 s; a verified phone gets the
+     usual 600 s to finish. Opening a PIN window replaces it.
+* **As built (Lapis-Zero):** both windows are the same on-demand `lapis-ble-prov.service`. Before
+  each start the daemon writes the mode to `/run/lapis/ble-prov.mode` (`pin` or `wifi`; missing
+  means `pin`). In the phone Wi-Fi window the process reports to the daemon with
+  `{"type":"wifi_ble","open":true,"expires_at":<epoch s>}` / `{"type":"wifi_ble","open":false}`
+  over the Unix socket instead of `pairing_event`, so the LCD never shows a pairing view for it.
+  A PIN window that replaces it is a `systemctl restart` with the mode file set to `pin`.
+* **Phone side:** BLE results are found by service UUID (`LapisZero-XXXX` / `LapisDeck-XXXX`).
+  The phone uses the token of the device the user is changing Wi-Fi for and never tries several
+  tokens on one device. A device that does not know the token stays silent (the envelope opens
+  with none of its key sets): time out after about 8 s with "This device was not paired with
+  this phone".
+
 ---
 
 ## 5. Cross-Language Deterministic Test Vectors (`tests/vectors/ble_crypto_vectors.json`)
@@ -270,7 +323,34 @@ out.write_text(json.dumps({
 }, indent=2) + "\n")
 ```
 
-### 5.3 Kotlin Interoperability Notes (`android/`)
+### 5.3 Paired-Phone Vector (`paired_vector`, section 4.2)
+
+Same keys, nonces, `seq` and `dir_byte` as `crypto_vector`; `secret` replaces the PIN. Added by
+`scripts/gen_ble_vectors.py` without changing the older sections.
+
+```json
+"paired_vector": {
+  "api_token": "lapis-paired-phone-test-token-0123456789AB",
+  "token_hash_hex": "2059acdcdcda41ea37690250c3ef95e93477b8e7ca38873d3060a0d73b748e9b",
+  "secret": "tok:2059acdcdcda41ea37690250c3ef95e93477b8e7ca38873d3060a0d73b748e9b",
+  "plaintext_utf8": "{\"cmd\":\"token_verify\",\"proof\":\"75017af529a8a56a0f85a46247c6b239097d7250a62c6891fcf8ffde2b114821\"}",
+  "derived": {
+    "salt_hex": "87567d44295e7291d9ec8c830f10309e6d480296a8a17b9de8fdf7a78f12e1aa",
+    "k_c2d_hex": "676faffbe1889104532d40f5738fdfffaeb049e8ad9650aadc52a977b7c0375d",
+    "k_d2c_hex": "758c4aee6b83cf59c00a8addb9c2d75c56b2942c9b7db73a07a05a2fb0b298a0",
+    "k_pin_hex": "d20970b5700961a2e96f8b7476fd88da1e049febcd5307e2d3ef34624c3425e5",
+    "client_proof_hex": "75017af529a8a56a0f85a46247c6b239097d7250a62c6891fcf8ffde2b114821",
+    "server_proof_hex": "0efeda1141d0211d9454aac69979608add879fe82d553a16ff7fa080063fe206",
+    "envelope_hex": "00000001b0c51f6c4d752492f33ec0f97e45e81dd6ae1ec6cd293fa73ea05039bf5a70b8320a391f30a79828f979081a204f23accf5578767ccb158d446e02abec805038b25ddf11a9ae5fd1b255c127c12ae832b77359886c39fd466e4ca491701d0c7c7de817a5373adff0a5159361508e6e1602"
+  }
+}
+```
+
+`daemon/tests/test_ble_crypto_vectors.py` checks the salt, keys, both proofs and the envelope,
+that the PIN's keys do not open it, and that a real `ProvisioningSession` holding the vector's
+device key answers it with `token_verified` and `server_proof_hex`.
+
+### 5.4 Kotlin Interoperability Notes (`android/`)
 
 * **X25519:** Use `com.google.crypto.tink:tink-android` (`X25519.computeSharedSecret(privateKey, peerPublicKey)`) or JDK/Conscrypt `KeyAgreement.getInstance("XDH")` (API 33+). Prefer **Tink's `X25519`** because `minSdk = 29` (Android 10) lacks built-in `XDH` in JCA.
 * **HKDF-SHA256:** `com.google.crypto.tink.subtle.Hkdf.computeHkdf("HmacSha256", sharedSecret, salt, info, 32)` matches Python `cryptography`'s `HKDF` output byte-for-byte.

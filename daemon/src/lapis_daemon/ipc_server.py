@@ -142,6 +142,8 @@ class IpcServer:
                 await core.pairing_stop()
             case {"type": "pairing_event"}:  # from lapis-ble-prov
                 core.on_pairing_event(msg)
+            case {"type": "wifi_ble"}:  # from lapis-ble-prov in the phone Wi-Fi window
+                core.on_wifi_ble(msg)
             case {"type": "reload_secrets"}:  # from lapis-ble-prov after push_secrets
                 core.reload_secrets()
             case {"type": "refresh_status"}:  # from lapis-ble-prov after Wi-Fi / Tailscale
