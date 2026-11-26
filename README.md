@@ -304,8 +304,22 @@ Lapis-Zero is early. It runs on real hardware, and it has been used by one perso
 | [`daemon/`](daemon/) | The agent, in Python: step loop, policy, VNC and SSH drivers, model adapters, API, Bluetooth setup |
 | [`android/`](android/) | The companion app, in Kotlin and Jetpack Compose |
 | [`os/`](os/) | The image build: a pi-gen stage on top of the CardputerZero board support |
+| [`uConsoleCM4/`](uConsoleCM4/) | **Lapis-Deck**: a standalone cyberdeck OS for the ClockworkPi uConsole (Raspberry Pi CM4) — see below |
 | [`config/`](config/) | Example configuration files |
 | [`scripts/`](scripts/) | Helpers: app install, a VNC host check, Bluetooth test vectors |
+
+## Lapis-Deck (uConsole)
+
+The same agentic idea, on a bigger machine. **Lapis-Deck** is a standalone cyberdeck OS for the
+[ClockworkPi uConsole](https://www.clockworkpi.com/uconsole) (Raspberry Pi CM4): no X11, no desktop.
+It boots into a keyboard- and gamepad-first HUD on DRM/KMS, runs SDR / Meshtastic / GPS / NetOps
+subsystems, and hosts a policy-gated agent that operates the deck's own radios and drives the
+machines on your Tailscale tailnet (VNC/SSH, or the agent CLIs installed on them). The Lapis-Zero
+Android companion app pairs with it and controls it, unchanged.
+
+It lives in [`uConsoleCM4/`](uConsoleCM4/) — Rust crates (`lapis-crypto`, `lapis-daemon`, `lapis-sdr`,
+`lapis-ui`), a Python agent stack, the companion app, and a pi-gen image builder. See
+[`uConsoleCM4/README.md`](uConsoleCM4/README.md) for the layout, build and flash steps.
 
 **Further reading:** [`SPEC.md`](SPEC.md) (the system),
 [`ANDROID_COMPANION_SPEC.md`](ANDROID_COMPANION_SPEC.md) (the app and the API),
